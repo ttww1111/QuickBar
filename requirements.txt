@@ -1,0 +1,8 @@
+pyautogui
+pyperclip
+pillow
+pywinauto
+pystray
+pywin32
+nuitka
+zstandard

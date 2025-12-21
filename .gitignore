@@ -1,0 +1,48 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Nuitka 编译生成
+*.build/
+nuitka_dist/
+
+# PyInstaller
+*.spec
+
+# 个人配置文件 (不应上传到 Git，每个用户的路径和指令都不同)
+config.json
+target_settings.json
+
+# 用户运行产生的本地校准数据
+assets/anchors/*.png
+!assets/anchors/.gitkeep
+
+# 日志文件
+*.log
+
+# 虚拟环境
+venv/
+.venv/
+
+# 编辑器配置
+.vscode/
+.idea/
