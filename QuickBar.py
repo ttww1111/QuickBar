@@ -25,20 +25,38 @@ def resource_path(relative_path):
     """
     获取资源的绝对路径，兼容 PyInstaller 和 Nuitka 打包模式
     """
-    # 1. 尝试 PyInstaller 的 _MEIPASS
+    # 1. PyInstaller 打包后的路径（最高优先级）
+    if hasattr(sys, '_MEIPASS'):
+        path = os.path.join(sys._MEIPASS, relative_path)
+        if os.path.exists(path):
+            return path
+    
+    # 2. 尝试可执行文件所在目录
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        path = os.path.join(exe_dir, relative_path)
+        if os.path.exists(path):
+            return path
+    
+    # 3. 尝试 __file__ 所在目录（开发模式）
+    try:
+        file_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(file_dir, relative_path)
+        if os.path.exists(path):
+            return path
+    except:
+        pass
+    
+    # 4. 当前工作目录
+    path = os.path.join(os.path.abspath("."), relative_path)
+    if os.path.exists(path):
+        return path
+    
+    # 如果都不存在，返回最可能的路径
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
-    
-    # 2. 尝试 Nuitka 的 __compiled__ 模式
-    #    Nuitka onefile 会将数据解压到临时目录，__file__ 指向该目录
-    if "__compiled__" in dir():
-        # Nuitka 编译后，__file__ 指向 exe 所在的临时解压目录
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        candidate = os.path.join(base_path, relative_path)
-        if os.path.exists(candidate):
-            return candidate
-    
-    # 3. 开发模式：直接使用当前工作目录
+    if getattr(sys, 'frozen', False):
+        return os.path.join(os.path.dirname(sys.executable), relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
 # 配置文件路径定义（配置文件不随 exe 打包，放在 exe 同级目录下）
@@ -134,15 +152,7 @@ class QuickBarApp:
         self.root.attributes("-alpha", 0.95) # 设置微透明度提升科技感
         
         # 设置窗口图标（任务栏显示）
-        try:
-            icon_path = os.path.join(ASSETS_DIR, "quickbar_icon.png")
-            if os.path.exists(icon_path):
-                # 任务栏图标可以稍大一些以便清晰显示
-                taskbar_img = ImageTk.PhotoImage(file=icon_path)
-                self.root.iconphoto(True, taskbar_img)
-                self._app_icon = taskbar_img  # 避免引用被回收
-        except Exception as e:
-            print(f"Taskbar icon error: {e}")
+        self._set_window_icon()
         
         # 使无边框窗口显示在任务栏
         self.root.after(10, self._show_in_taskbar)
@@ -164,7 +174,7 @@ class QuickBarApp:
         self.auto_send = tk.BooleanVar(value=saved_state.get("auto_send", True))
         self.is_topmost = tk.BooleanVar(value=saved_state.get("is_topmost", True))
         self.current_theme = tk.StringVar(value=saved_state.get("theme", "Dark")) 
-        self.minimize_to = saved_state.get("minimize_to", "taskbar") # 默认任务栏
+        self.minimize_to = saved_state.get("minimize_to", None) # 默认 None，首次使用时弹窗询问
         self.column_count = tk.StringVar(value=saved_state.get("column_count", "auto")) # "auto", "1", "2"
         self.close_to_tray = tk.BooleanVar(value=saved_state.get("close_to_tray", False))  # 关闭时最小化到托盘
         self.auto_start = tk.BooleanVar(value=saved_state.get("auto_start", False))  # 开机自启
@@ -178,6 +188,7 @@ class QuickBarApp:
         self.drag_obj = None
         self.drag_start_idx = None
         self.mode = None 
+        self.is_button_dragging = False  # 新增：标记是否正在拖拽按钮
         self.tray_icon = None
         self.placeholder = None
         self.icon_cache = {} 
@@ -246,8 +257,16 @@ class QuickBarApp:
         # 5. 几何结构与主题
         if "geometry" in saved_state:
             self.root.geometry(saved_state["geometry"])
+            print(f"恢复窗口位置: {saved_state['geometry']}")
         else:
-            self.root.geometry("200x550+100+100")
+            # 首次打开时居中显示
+            win_w, win_h = 200, 550
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            x = (screen_w - win_w) // 2
+            y = (screen_h - win_h) // 2
+            self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+            print(f"首次打开，居中显示: {win_w}x{win_h}+{x}+{y}")
         self.root.attributes("-topmost", self.is_topmost.get())
         
         self.themes = {
@@ -462,6 +481,83 @@ class QuickBarApp:
             self.tray_icon.stop()
         self.root.destroy()
 
+    def _set_window_icon(self):
+        """设置窗口图标（任务栏和标题栏）"""
+        # 尝试多个路径查找图标
+        icon_paths = [
+            os.path.join(ASSETS_DIR, "Quickbar.ico"),
+            os.path.join(ASSETS_DIR, "Quickbar.png"),
+        ]
+        
+        # 对于编译后的应用，也检查 exe 所在目录
+        if getattr(sys, 'frozen', False):
+            exe_dir = os.path.dirname(sys.executable)
+            icon_paths.insert(0, os.path.join(exe_dir, "assets", "Quickbar.ico"))
+            icon_paths.insert(1, os.path.join(exe_dir, "assets", "Quickbar.png"))
+        
+        # 1. 首先尝试使用 Tkinter 的 iconphoto（适用于PNG）
+        for path in icon_paths:
+            if os.path.exists(path) and path.endswith('.png'):
+                try:
+                    taskbar_img = ImageTk.PhotoImage(file=path)
+                    self.root.iconphoto(True, taskbar_img)
+                    self._app_icon = taskbar_img  # 避免引用被回收
+                    print(f"图标加载成功 (iconphoto): {path}")
+                    break
+                except Exception as e:
+                    print(f"iconphoto 加载失败: {e}")
+        
+        # 2. 然后尝试使用 Windows API 设置图标（适用于ICO）
+        if win32gui:
+            for path in icon_paths:
+                if os.path.exists(path) and path.endswith('.ico'):
+                    try:
+                        # 使用 win32gui 加载 ICO 文件
+                        icon_flags = win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE
+                        
+                        # 加载大图标（任务栏用）
+                        hicon_big = win32gui.LoadImage(
+                            None, path, win32con.IMAGE_ICON,
+                            32, 32, icon_flags
+                        )
+                        # 加载小图标（标题栏用）
+                        hicon_small = win32gui.LoadImage(
+                            None, path, win32con.IMAGE_ICON,
+                            16, 16, icon_flags
+                        )
+                        
+                        # 稍后设置（需要在窗口创建之后）
+                        self._pending_icons = (hicon_big, hicon_small, path)
+                        print(f"ICO 图标准备成功: {path}")
+                        break
+                    except Exception as e:
+                        print(f"ICO 加载失败 ({path}): {e}")
+
+    def _apply_window_icon(self):
+        """在窗口句柄可用后应用图标"""
+        if not hasattr(self, '_pending_icons') or not win32gui:
+            return
+        
+        try:
+            hicon_big, hicon_small, path = self._pending_icons
+            hwnd = self.hwnd if hasattr(self, 'hwnd') else None
+            
+            if not hwnd:
+                import ctypes
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                if hwnd == 0:
+                    hwnd = self.root.winfo_id()
+            
+            WM_SETICON = 0x80
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            
+            win32gui.SendMessage(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+            win32gui.SendMessage(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+            print(f"窗口图标应用成功: {path}")
+        except Exception as e:
+            print(f"应用窗口图标失败: {e}")
+
     def _show_in_taskbar(self):
         """使无边框窗口显示在任务栏中，并支持任务栏点击最小化"""
         try:
@@ -487,6 +583,9 @@ class QuickBarApp:
             # 刷新窗口
             self.root.withdraw()
             self.root.after(10, self.root.deiconify)
+            
+            # 应用 ICO 图标（如果已准备好）
+            self.root.after(50, self._apply_window_icon)
                 
         except Exception as e:
             print(f"任务栏显示设置失败: {e}")
@@ -526,10 +625,33 @@ class QuickBarApp:
             if not self.tray_icon:
                 threading.Thread(target=self.setup_tray, daemon=True).start()
         else:
-            self.root.iconify()
+            # 对于无边框窗口 (overrideredirect)，iconify() 不起作用
+            # 需要使用 Windows API 直接最小化
+            try:
+                import ctypes
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                if hwnd == 0:
+                    hwnd = self.root.winfo_id()
+                # SW_MINIMIZE = 6
+                ctypes.windll.user32.ShowWindow(hwnd, 6)
+            except Exception as e:
+                print(f"最小化失败: {e}")
+                # 回退方案：隐藏到托盘
+                self.root.withdraw()
+                if not self.tray_icon:
+                    threading.Thread(target=self.setup_tray, daemon=True).start()
 
     def show_window(self):
-        """从托盘恢复窗口"""
+        """从托盘或最小化状态恢复窗口"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if hwnd == 0:
+                hwnd = self.root.winfo_id()
+            # SW_RESTORE = 9
+            ctypes.windll.user32.ShowWindow(hwnd, 9)
+        except:
+            pass
         self.root.deiconify()
         self.root.attributes("-topmost", self.is_topmost.get())
         self.save_config()
@@ -539,11 +661,16 @@ class QuickBarApp:
         初始化图标状态并建立全局缓存。
         """
         self.icon_cache = {} 
+        
+        # 调试：打印资源目录
+        print(f"ASSETS_DIR = {ASSETS_DIR}")
+        print(f"ASSETS_DIR exists = {os.path.exists(ASSETS_DIR)}")
+        
         icons_to_load = {
-            "app": "quickbar_icon.png",
+            "app": "Quickbar.png",
             "vscode": "Vscode.png",
             "antigravity": "Antigravity.png",
-            "terminal": "terminal_icon.png",
+            "terminal": "Terminal.png",
             "claude": "Claude.png",
             "codex": "Codex.png"
         }
@@ -554,6 +681,7 @@ class QuickBarApp:
                 try:
                     # 预先把图像加载进内存
                     self.icon_cache[key] = Image.open(path).convert("RGBA")
+                    print(f"图标加载成功: {key} -> {path}")
                 except Exception as e:
                     print(f"Error loading icon {name}: {e}")
             else:
@@ -563,11 +691,53 @@ class QuickBarApp:
         """设置并运行系统托盘"""
         if not pystray: return
         
-        # 使用 QuickBar 专属图标（增大尺寸以获得更清晰的显示）
-        try:
-            image = Image.open(os.path.join(ASSETS_DIR, "quickbar_icon.png")).resize((128, 128), Image.LANCZOS)
-        except:
-            image = Image.new('RGB', (128, 128), color=(0, 122, 204))
+        image = None
+        
+        # 1. 首先尝试从 icon_cache 获取（已预加载的图像）
+        if "app" in self.icon_cache:
+            try:
+                # 系统托盘图标最佳尺寸是 64x64
+                image = self.icon_cache["app"].copy().resize((64, 64), Image.LANCZOS)
+                print("托盘图标从缓存加载成功")
+            except Exception as e:
+                print(f"从缓存加载托盘图标失败: {e}")
+        
+        # 2. 如果缓存失败，尝试多个文件路径
+        if image is None:
+            icon_paths = [
+                os.path.join(ASSETS_DIR, "quickbar_icon.png"),
+            ]
+            
+            # 对于编译后的应用，添加 exe 所在目录的路径
+            if getattr(sys, 'frozen', False):
+                exe_dir = os.path.dirname(sys.executable)
+                icon_paths.insert(0, os.path.join(exe_dir, "assets", "Quickbar.png"))
+            
+            # 添加其他备选路径
+            icon_paths.extend([
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "Quickbar.png"),
+                os.path.join(os.path.abspath("."), "assets", "Quickbar.png"),
+            ])
+            
+            for path in icon_paths:
+                if os.path.exists(path):
+                    try:
+                        img = Image.open(path)
+                        image = img.resize((64, 64), Image.LANCZOS).convert("RGBA")
+                        print(f"托盘图标加载成功: {path}")
+                        break
+                    except Exception as e:
+                        print(f"托盘图标加载失败 ({path}): {e}")
+                        continue
+        
+        # 3. 如果所有路径都失败，创建带 Q 字样的默认图标
+        if image is None:
+            print("所有图标路径加载失败，使用默认图标")
+            image = Image.new('RGBA', (64, 64), color=(0, 122, 204, 255))
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(image)
+            draw.ellipse([8, 8, 56, 56], fill=(0, 122, 204, 255), outline=(255, 255, 255, 255), width=3)
+            draw.line([40, 40, 56, 56], fill=(255, 255, 255, 255), width=4)
         
         def on_double_click(icon, item):
             """双击托盘图标时显示窗口"""
@@ -579,6 +749,7 @@ class QuickBarApp:
         )
         self.tray_icon = pystray.Icon("QuickBar", image, "QuickBar", menu)
         self.tray_icon.run()
+
 
 
 
@@ -632,7 +803,8 @@ class QuickBarApp:
         btn_min = tk.Label(btn_frame, text="—", bg=colors["header"], fg=colors["subtext"], 
                           font=("Segoe UI", 7), cursor="hand2", width=3)
         btn_min.pack(side="right", fill="y")
-        btn_min.bind("<Button-1>", self.minimize_app)
+        # 使用 lambda 和 after 确保事件处理更可靠
+        btn_min.bind("<Button-1>", lambda e: [self.root.after(10, self.minimize_app), "break"][-1])
         btn_min.bind("<Enter>", lambda e: btn_min.config(bg=colors["btn_hover"]))
         btn_min.bind("<Leave>", lambda e: btn_min.config(bg=colors["header"]))
 
@@ -724,7 +896,8 @@ class QuickBarApp:
                     lbl = tk.Label(f, text=ide[:2], bg=colors["header"], 
                                   fg=colors["text_active"] if is_active else colors["subtext"], 
                                   font=("Segoe UI", 9, "bold"), cursor="hand2")
-            except:
+            except Exception as e:
+                print(f"IDE 图标渲染失败 ({ide}): {e}")
                 lbl = tk.Label(f, text=ide[:2], bg=colors["header"], 
                               fg=colors["text_active"] if is_active else colors["subtext"], 
                               font=("Segoe UI", 9, "bold"), cursor="hand2")
@@ -814,22 +987,23 @@ class QuickBarApp:
         auto_frame.pack(side="left", padx=(5, 0))
         
         is_auto = self.auto_send.get()
-        check_icon = "\uE73E" if is_auto else "\uE739"
+        # 使用更通用的 Unicode 复选框字符
+        check_icon = "☑" if is_auto else "☐"
         check_color = colors["active"] if is_auto else colors["subtext"]
         
         check_box = tk.Label(auto_frame, text=check_icon, bg=colors["header"], fg=check_color,
-                            font=("Segoe MDL2 Assets", 10), cursor="hand2", pady=5)
+                            font=("Segoe UI Symbol", 12), cursor="hand2", pady=5)
         check_box.pack(side="left")
         
         auto_lbl = tk.Label(auto_frame, text="自动发送", bg=colors["header"], fg=colors["subtext"], 
                  font=("Microsoft YaHei", 8), cursor="hand2", pady=5)
-        auto_lbl.pack(side="left", padx=(2, 0))
+        auto_lbl.pack(side="left", padx=0)
         
         def toggle_auto(e=None):
             self.auto_send.set(not self.auto_send.get())
             self.save_config()
             # 只刷新复选框图标，避免重建整个UI导致闪动
-            new_icon = "\uE73E" if self.auto_send.get() else "\uE739"
+            new_icon = "☑" if self.auto_send.get() else "☐"
             new_color = colors["active"] if self.auto_send.get() else colors["subtext"]
             check_box.config(text=new_icon, fg=new_color)
             return "break"
@@ -1125,15 +1299,9 @@ class QuickBarApp:
         else:
             num_columns = int(col_setting)
         
-        # 预创建一个占位符
-        self.placeholder = tk.Canvas(self.cmd_container, bg=colors["bg"], height=40, highlightthickness=0)
-        
-        def draw_placeholder(e):
-            self.placeholder.delete("all")
-            w = self.placeholder.winfo_width()
-            if w > 10:
-                self._draw_rounded_rect(self.placeholder, 2, 2, w-4, 38, radius=8, fill=colors["header"], outline=colors["active"], width=1)
-        self.placeholder.bind("<Configure>", draw_placeholder)
+        # 预创建一个虚线框占位符（使用 Toplevel 窗口确保显示在最上层）
+        self.placeholder = None
+        self.placeholder_visible = False
         
         # 配置 grid 列权重
         for col in range(num_columns):
@@ -1193,17 +1361,21 @@ class QuickBarApp:
             ToolTip(btn_canvas, cmd['text'])
 
 
-    # --- 改进后的拖拽排序逻辑（带虚线占位符） ---
+    # --- 改进后的拖拽排序逻辑 ---
     def start_drag(self, event, idx, text):
-        """按下按钮：初始化拖拽环境，并在此处检查校准"""
+        """按下按钮：初始化拖拽环境"""
+        # 立即标记正在拖拽按钮，阻止窗口移动模式
+        self.is_button_dragging = True
+        
         # 检查当前选中的目标(IDE + AI)是否已校准
         ide, ai = self.current_ide.get(), self.current_ai.get()
         config = self.target_settings.get(ide, {}).get(ai, {})
         is_calibrated = config.get("offset_x", 0) != 0 or config.get("offset_y", 0) != 0
         
-        # Native CLI 模式不需要校准提示（使用的是右键粘贴逻辑）
+        # Native CLI 模式不需要校准提示
         if ide != "Native CLI" and not is_calibrated:
             from tkinter import messagebox
+            self.is_button_dragging = False
             if messagebox.askyesno("QuickBar", self.t("calibration_tip")):
                 self.start_calibration()
                 return "break"
@@ -1214,68 +1386,200 @@ class QuickBarApp:
         self.drag_y_origin = event.y 
         self.drag_y_root_start = event.y_root
         self.is_real_drag = False
+        self.drag_target_idx = idx  # 目标插入位置
         return "break"
         
     def do_drag(self, event):
-        """拖动中：视觉跟随 + 实时移动占位符"""
+        """拖动中：计算目标位置并显示蓝线"""
         if not self.drag_obj: return "break"
         
+        colors = self.themes[self.current_theme.get()]
+        
+        # 检测是否开始真正拖拽（移动超过 5 像素）
         if not self.is_real_drag and abs(event.y_root - self.drag_y_root_start) > 5:
             self.is_real_drag = True
-            # 变淡显示，增强拖拽感
-            self.drag_obj.config(bg=self.themes[self.current_theme.get()]["active"])
-            # 展示占位符
-            self.placeholder.pack(fill="x", padx=5, pady=2, before=self.drag_obj)
+            # 创建浮动拖拽预览窗口
+            self._create_drag_preview(colors)
         
         if self.is_real_drag:
-            # 视觉跟随
-            new_y = event.y_root - self.cmd_container.winfo_rooty() - self.drag_y_origin
-            self.drag_obj.place(x=0, y=new_y, relwidth=1)
-            self.drag_obj.lift() 
+            # 更新浮动预览位置
+            if hasattr(self, 'drag_preview') and self.drag_preview:
+                preview_x = self.root.winfo_x() + 15
+                preview_y = event.y_root - 18
+                self.drag_preview.geometry(f"+{preview_x}+{preview_y}")
             
-            # 逻辑交换
-            target_y = event.y_root - self.cmd_container.winfo_rooty()
-            children = [c for c in self.cmd_container.winfo_children() if c != self.drag_obj and c != self.placeholder]
-            
-            new_idx = 0
-            for i, child in enumerate(children):
-                cy, ch = child.winfo_y(), child.winfo_height()
-                if target_y > cy + ch/2:
-                    new_idx = i + 1
-            
-            if hasattr(self, 'current_p_idx') and self.current_p_idx == new_idx:
-                pass 
-            else:
-                self.current_p_idx = new_idx
-                self.placeholder.pack_forget()
-                if new_idx < len(children):
-                    self.placeholder.pack(fill="x", padx=5, pady=2, before=children[new_idx])
-                else:
-                    self.placeholder.pack(fill="x", padx=5, pady=2)
+            # 计算目标插入位置
+            self._update_drop_indicator(event)
                     
         return "break"
+    
+    def _create_drag_preview(self, colors):
+        """创建浮动的拖拽预览窗口"""
+        cmd_name = self.commands[self.drag_start_idx]["name"]
+        
+        # 创建浮动窗口
+        self.drag_preview = tk.Toplevel(self.root)
+        self.drag_preview.overrideredirect(True)
+        self.drag_preview.attributes("-alpha", 0.85)
+        self.drag_preview.attributes("-topmost", True)
+        
+        # 预览框的内容
+        preview_w = self.cmd_container.winfo_width() - 20
+        preview_canvas = tk.Canvas(self.drag_preview, width=preview_w, height=36, 
+                                   bg=colors["btn_hover"], highlightthickness=2,
+                                   highlightbackground=colors["active"])
+        preview_canvas.pack()
+        preview_canvas.create_text(preview_w/2, 18, text=cmd_name, 
+                                   fill=colors["text_active"], font=("Microsoft YaHei", 9, "bold"))
+        
+        # 隐藏原按钮（透明化）
+        self.drag_obj.config(bg=colors["bg"])
+        self.drag_obj.delete("all")
+    
+    def _update_drop_indicator(self, event):
+        """更新蓝色横线指示器位置"""
+        colors = self.themes[self.current_theme.get()]
+        
+        # 获取容器内所有按钮（包括被拖拽的，但标记其位置）
+        all_buttons = []
+        drag_visual_idx = -1
+        btn_idx = 0
+        for child in self.cmd_container.winfo_children():
+            if child == self.placeholder:
+                continue
+            if child == self.drag_obj:
+                drag_visual_idx = btn_idx
+                btn_idx += 1
+                continue
+            all_buttons.append((btn_idx, child))
+            btn_idx += 1
+        
+        # 计算鼠标在容器内的相对 Y 坐标
+        container_y = self.cmd_container.winfo_rooty()
+        mouse_y = event.y_root - container_y
+        
+        # 找到目标插入位置（在原始列表中的位置）
+        # target_idx 表示：在原始 commands 列表中，插入到这个索引之前
+        target_idx = 0
+        line_y = 0
+        
+        if not all_buttons:
+            # 只有一个按钮（被拖拽的那个）
+            self.drag_target_idx = 0
+            return
+        
+        # 计算插入位置和虚线框显示位置
+        target_btn = None  # 目标位置的参考按钮
+        for i, (visual_idx, btn) in enumerate(all_buttons):
+            btn_y = btn.winfo_y()
+            btn_h = btn.winfo_height()
+            btn_center = btn_y + btn_h / 2
+            
+            if mouse_y > btn_center:
+                # 插入到这个按钮下方
+                target_idx = i + 1
+                # 虚线框显示在下一个按钮位置（如果有的话）
+                if i + 1 < len(all_buttons):
+                    target_btn = all_buttons[i + 1][1]
+                else:
+                    target_btn = btn  # 最后位置，用最后一个按钮参考
+            else:
+                # 插入到这个按钮上方
+                target_idx = i
+                target_btn = btn
+                break
+        else:
+            # 遍历完了，说明在最后一个按钮下方
+            target_idx = len(all_buttons)
+            if all_buttons:
+                target_btn = all_buttons[-1][1]
+        
+        # 将 target_idx 转换为原始列表位置
+        if target_idx >= self.drag_start_idx:
+            self.drag_target_idx = target_idx + 1
+        else:
+            self.drag_target_idx = target_idx
+        
+        # 显示横线指示器（显示在按钮之间的缝隙处）
+        if target_btn:
+            colors = self.themes[self.current_theme.get()]
+            container_w = self.cmd_container.winfo_width()
+            ph_width = container_w - 14
+            ph_height = 3  # 简单横线
+            
+            # 计算横线在屏幕上的绝对位置
+            container_x = self.cmd_container.winfo_rootx()
+            container_y = self.cmd_container.winfo_rooty()
+            
+            if target_idx >= len(all_buttons):
+                # 放在最后：在最后一个按钮下方
+                box_y = target_btn.winfo_y() + target_btn.winfo_height() + 2
+            else:
+                # 放在目标按钮上方（缝隙处）
+                box_y = target_btn.winfo_y() - 3
+            
+            abs_x = container_x + 7
+            abs_y = container_y + box_y
+            
+            # 创建或更新 Toplevel 横线窗口
+            if not self.placeholder:
+                self.placeholder = tk.Toplevel(self.root)
+                self.placeholder.overrideredirect(True)
+                self.placeholder.attributes("-topmost", True)
+            
+            # 更新位置、大小和颜色
+            self.placeholder.geometry(f"{ph_width}x{ph_height}+{abs_x}+{abs_y}")
+            self.placeholder.config(bg=colors["active"])
+            self.placeholder.deiconify()
 
     def stop_drag(self, event):
-        """松开鼠标：根据占位符最终位置更新数据并重绘"""
-        if not self.drag_obj: return "break"
+        """松开鼠标：完成拖拽"""
+        self.is_button_dragging = False
+        
+        # 隐藏虚线框
+        if self.placeholder:
+            self.placeholder.withdraw()
+        
+        # 销毁浮动预览
+        if hasattr(self, 'drag_preview') and self.drag_preview:
+            self.drag_preview.destroy()
+            self.drag_preview = None
+        
+        if not self.drag_obj: 
+            return "break"
         
         if not self.is_real_drag:
+            # 单击：发送命令
             self.send_to_target(self.drag_text)
         else:
-            children = [c for c in self.cmd_container.winfo_children() if c != self.drag_obj]
-            final_idx = children.index(self.placeholder)
-            item = self.commands.pop(self.drag_start_idx)
-            self.commands.insert(final_idx, item)
-            self.save_config()
-            
-        if hasattr(self, 'current_p_idx'): del self.current_p_idx
-        self.drag_obj.place_forget()
+            # 拖拽完成：移动命令
+            if hasattr(self, 'drag_target_idx'):
+                from_idx = self.drag_start_idx
+                to_idx = self.drag_target_idx
+                
+                # drag_target_idx 是目标位置（在原始列表中）
+                # 如果 to_idx > from_idx，pop 后需要 -1
+                if from_idx != to_idx and to_idx != from_idx + 1:
+                    item = self.commands.pop(from_idx)
+                    if to_idx > from_idx:
+                        to_idx -= 1
+                    self.commands.insert(to_idx, item)
+                    self.save_config()
+        
+        # 清理状态
+        if hasattr(self, 'drag_target_idx'): 
+            del self.drag_target_idx
         self.drag_obj = None
         self.refresh_cmd_list()
         return "break"
 
     # --- 窗口交互（移动/缩放）实现方法 ---
     def on_press(self, event):
+        # 如果正在拖拽命令按钮，完全忽略窗口移动/缩放
+        if self.is_button_dragging or self.drag_obj is not None:
+            self.mode = None
+            return
+        
         self.start_x, self.start_y = event.x, event.y
         self.win_w, self.win_h = self.root.winfo_width(), self.root.winfo_height()
         if event.x > self.win_w - self.EDGE_SIZE and event.y > self.win_h - self.EDGE_SIZE: self.mode = "resize_both"
@@ -1284,6 +1588,10 @@ class QuickBarApp:
         else: self.mode = "move"
 
     def on_motion(self, event):
+        # 如果正在拖拽命令按钮，则跳过窗口移动/缩放
+        if self.drag_obj is not None:
+            return
+        
         MIN_WIDTH = 180  # 最小宽度限制
         MIN_HEIGHT = 150  # 最小高度限制
         if self.mode == "move":
@@ -1298,6 +1606,7 @@ class QuickBarApp:
             self.root.geometry(f"{max(MIN_WIDTH, event.x)}x{max(MIN_HEIGHT, event.y)}")
             self.root.update_idletasks()
         self.save_config()
+
 
     def update_cursor(self, event):
         x, y = event.x, event.y
@@ -1578,12 +1887,27 @@ class ScreenshotDialog:
         self.z_win = tk.Toplevel(self.root); self.z_win.overrideredirect(True); self.z_win.attributes("-topmost", True)
         self.z_can = tk.Canvas(self.z_win, width=self.zoom_size, height=self.zoom_size, highlightthickness=2, highlightbackground="yellow")
         self.z_can.pack()
-        # 添加背景文字阴影使提示更清晰
-        self.canvas.create_text(self.root.winfo_screenwidth()/2 + 2, 52, text=prompt, fill="black", font=("Microsoft YaHei", 20, "bold"))
-        self.canvas.create_text(self.root.winfo_screenwidth()/2, 50, text=prompt, fill="#00FF00", font=("Microsoft YaHei", 20, "bold"))
         
-        self.canvas.create_text(self.root.winfo_screenwidth()/2 + 1, 86, text="(按 ESC 键取消校准)", fill="black", font=("Microsoft YaHei", 10, "bold"))
-        self.canvas.create_text(self.root.winfo_screenwidth()/2, 85, text="(按 ESC 键取消校准)", fill="white", font=("Microsoft YaHei", 10, "bold"))
+        # 创建置顶的提示文字窗口（显示在遮罩上方）
+        self.tip_win = tk.Toplevel(self.root)
+        self.tip_win.overrideredirect(True)
+        self.tip_win.attributes("-topmost", True)
+        self.tip_win.attributes("-transparentcolor", "black")
+        self.tip_win.configure(bg="black")
+        
+        screen_w = self.root.winfo_screenwidth()
+        tip_w, tip_h = 600, 100
+        self.tip_win.geometry(f"{tip_w}x{tip_h}+{(screen_w-tip_w)//2}+{20}")
+        
+        tip_canvas = tk.Canvas(self.tip_win, width=tip_w, height=tip_h, bg="black", highlightthickness=0)
+        tip_canvas.pack()
+        # 主提示文字 - 红色醒目
+        tip_canvas.create_text(tip_w//2 + 2, 32, text=prompt, fill="#333333", font=("Microsoft YaHei", 20, "bold"))
+        tip_canvas.create_text(tip_w//2, 30, text=prompt, fill="#FF3333", font=("Microsoft YaHei", 20, "bold"))
+        # 副提示文字 - 黄色
+        tip_canvas.create_text(tip_w//2 + 1, 67, text="(按 ESC 键或鼠标右键取消校准)", fill="#333333", font=("Microsoft YaHei", 10, "bold"))
+        tip_canvas.create_text(tip_w//2, 65, text="(按 ESC 键或鼠标右键取消校准)", fill="#FFFF00", font=("Microsoft YaHei", 10, "bold"))
+        
         self.start_x = self.start_y = self.rect = None
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
@@ -1591,7 +1915,9 @@ class ScreenshotDialog:
         self.canvas.bind("<Motion>", lambda e: self.update_zoom(e.x_root, e.y_root))
         # 修复：拖拽时也要同步更新放大镜
         self.canvas.bind("<B1-Motion>", lambda e: [self.on_drag(e), self.update_zoom(e.x_root, e.y_root)], add="+")
-        self.root.bind("<Escape>", lambda e: self.root.destroy()) # 支持 ESC 退出
+        # 支持 ESC 退出和鼠标右键退出
+        self.root.bind("<Escape>", lambda e: [self.tip_win.destroy(), self.z_win.destroy(), self.root.destroy()])
+        self.canvas.bind("<Button-3>", lambda e: [self.tip_win.destroy(), self.z_win.destroy(), self.root.destroy()])
         parent.wait_window(self.root)
 
     def update_zoom(self, x, y):
@@ -1621,16 +1947,33 @@ class LocationDialog:
         self.z_win = tk.Toplevel(self.root); self.z_win.overrideredirect(True); self.z_win.attributes("-topmost", True)
         self.z_can = tk.Canvas(self.z_win, width=self.zoom_size, height=self.zoom_size, highlightthickness=2, highlightbackground="yellow")
         self.z_can.pack()
-        # 添加背景文字阴影使提示更清晰
-        self.canvas.create_text(self.root.winfo_screenwidth()/2 + 2, 52, text=prompt, fill="black", font=("Microsoft YaHei", 20, "bold"))
-        self.canvas.create_text(self.root.winfo_screenwidth()/2, 50, text=prompt, fill="#00FFFF", font=("Microsoft YaHei", 20, "bold"))
         
-        self.canvas.create_text(self.root.winfo_screenwidth()/2 + 1, 86, text="(按 ESC 键取消校准)", fill="black", font=("Microsoft YaHei", 10, "bold"))
-        self.canvas.create_text(self.root.winfo_screenwidth()/2, 85, text="(按 ESC 键取消校准)", fill="white", font=("Microsoft YaHei", 10, "bold"))
+        # 创建置顶的提示文字窗口（显示在遮罩上方）
+        self.tip_win = tk.Toplevel(self.root)
+        self.tip_win.overrideredirect(True)
+        self.tip_win.attributes("-topmost", True)
+        self.tip_win.attributes("-transparentcolor", "black")
+        self.tip_win.configure(bg="black")
+        
+        screen_w = self.root.winfo_screenwidth()
+        tip_w, tip_h = 600, 100
+        self.tip_win.geometry(f"{tip_w}x{tip_h}+{(screen_w-tip_w)//2}+{20}")
+        
+        tip_canvas = tk.Canvas(self.tip_win, width=tip_w, height=tip_h, bg="black", highlightthickness=0)
+        tip_canvas.pack()
+        # 主提示文字 - 红色醒目
+        tip_canvas.create_text(tip_w//2 + 2, 32, text=prompt, fill="#333333", font=("Microsoft YaHei", 20, "bold"))
+        tip_canvas.create_text(tip_w//2, 30, text=prompt, fill="#FF3333", font=("Microsoft YaHei", 20, "bold"))
+        # 副提示文字 - 黄色
+        tip_canvas.create_text(tip_w//2 + 1, 67, text="(按 ESC 键或鼠标右键取消校准)", fill="#333333", font=("Microsoft YaHei", 10, "bold"))
+        tip_canvas.create_text(tip_w//2, 65, text="(按 ESC 键或鼠标右键取消校准)", fill="#FFFF00", font=("Microsoft YaHei", 10, "bold"))
+        
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Motion>", lambda e: self.update_zoom(e.x_root, e.y_root))
         self.canvas.bind("<B1-Motion>", lambda e: self.update_zoom(e.x_root, e.y_root))
-        self.root.bind("<Escape>", lambda e: self.root.destroy()) # 支持 ESC 退出
+        # 支持 ESC 退出和鼠标右键退出
+        self.root.bind("<Escape>", lambda e: [self.tip_win.destroy(), self.z_win.destroy(), self.root.destroy()])
+        self.canvas.bind("<Button-3>", lambda e: [self.tip_win.destroy(), self.z_win.destroy(), self.root.destroy()])
         parent.wait_window(self.root)
 
     def update_zoom(self, x, y):
