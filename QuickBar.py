@@ -18,7 +18,7 @@ except ImportError:
     pystray = None
 
 # 版本信息
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "https://github.com/ttww1111/QuickBar"
 
 def resource_path(relative_path):
