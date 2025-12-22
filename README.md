@@ -2,9 +2,7 @@
 
 QuickBar 是一款专为开发者设计的**极简、高效**的指令/提示词（Prompt）管理与自动化输入工具。它可以帮助你一键将常用的指令、代码片段或提示词发送到目标 IDE（如 VS Code）中的 AI 助手窗口或原生终端中。
 
-<p align="center">
-  <img src="assets/Quickbar.png" alt="QuickBar 图标" width="128" height="128">
-</p>
+
 
 <p align="center">
   <img src="assets/Quickbar_screenshot_dark.png" alt="深色主题" height="400">
