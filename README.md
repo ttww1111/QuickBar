@@ -162,14 +162,6 @@ pyinstaller --noconfirm --onefile --windowed --name=QuickBar --icon=assets/Quick
 ### Q: 校准后点击按钮没有反应？
 A: 尝试重新校准。确保校准时选择的特征点在目标应用中始终可见。
 
-### Q: 任务栏图标显示模糊？
-A: 确保 `assets/Quickbar.ico` 包含多种尺寸（16-256px）。可以使用 Pillow 重新生成。
-
-### Q: 最小化按钮不工作？
-A: 已修复。程序使用 Windows API 处理无边框窗口的最小化/恢复。
-
-### Q: 首次打开窗口不居中？
-A: 删除 `config.json` 后重新启动，窗口会自动居中显示。
 
 ## 📝 更新日志
 
