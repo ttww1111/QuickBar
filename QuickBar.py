@@ -19,7 +19,7 @@ except ImportError:
 
 # 版本信息
 APP_VERSION = "1.1.0"
-GITHUB_REPO = "https://github.com/user/quickbar"  # 替换为实际的仓库地址
+GITHUB_REPO = "https://github.com/ttww1111/QuickBar"
 
 def resource_path(relative_path):
     """
@@ -166,6 +166,11 @@ class QuickBarApp:
         self._init_ui()
         self._bind_events()
 
+        # 4. 启动时检查更新
+        if self.check_update_startup.get():
+            # 延迟 3 秒检查，以免影响启动速度感
+            self.root.after(3000, lambda: self.check_update(silent=True))
+
     def _init_variables(self, saved_state):
         """初始化运行时的内部变量"""
         # 1. 初始化持久化状态变量
@@ -179,6 +184,7 @@ class QuickBarApp:
         self.close_to_tray = tk.BooleanVar(value=saved_state.get("close_to_tray", False))  # 关闭时最小化到托盘
         self.auto_start = tk.BooleanVar(value=saved_state.get("auto_start", False))  # 开机自启
         self.theme_follow_system = tk.BooleanVar(value=saved_state.get("theme_follow_system", True))  # 主题跟随系统
+        self.check_update_startup = tk.BooleanVar(value=saved_state.get("check_update_startup", True))  # 启动时检查更新
         
         # 如果启用了主题跟随系统，则检测并应用系统主题
         if self.theme_follow_system.get():
@@ -221,6 +227,7 @@ class QuickBarApp:
                 "auto_send": "自动发送", "pin": "切换窗口置顶", "show_quickbar": "显示 QuickBar", "exit": "退出",
                 "import_config": "导入配置", "export_config": "导出配置", "about": "关于",
                 "version": "版本", "check_update": "检查更新", "no_update": "已是最新版本",
+                "new_version": "发现新版本！", "check_update_startup": "启动时检查更新",
                 "import_success": "配置导入成功", "export_success": "配置导出成功",
                 "calibration_tip": "检测到您尚未校准当前目标的输入框位置。\n\n请先确保已打开目标 IDE 并点开对应的 AI 对话框（使其可见），然后再点击“是”开始校准。是否开始？"
             },
@@ -235,6 +242,7 @@ class QuickBarApp:
                 "auto_send": "Auto Send", "pin": "Toggle Pin", "show_quickbar": "Show QuickBar", "exit": "Exit",
                 "import_config": "Import Config", "export_config": "Export Config", "about": "About",
                 "version": "Version", "check_update": "Check Update", "no_update": "Already up to date",
+                "new_version": "New version available!", "check_update_startup": "Check for updates on startup",
                 "import_success": "Config imported successfully", "export_success": "Config exported successfully",
                 "calibration_tip": "Calibration not detected for this target.\n\nPlease ensure the target IDE and AI chat window are open and visible before clicking 'Yes'. Start calibration now?"
             },
@@ -249,6 +257,7 @@ class QuickBarApp:
                 "auto_send": "自動送信", "pin": "ピン固定", "show_quickbar": "QuickBar表示", "exit": "終了",
                 "import_config": "設定インポート", "export_config": "設定エクスポート", "about": "について",
                 "version": "バージョン", "check_update": "更新確認", "no_update": "最新版です",
+                "new_version": "新しいバージョンがあります！", "check_update_startup": "起動時に更新を確認",
                 "import_success": "設定をインポートしました", "export_success": "設定をエクスポートしました",
                 "calibration_tip": "現在のターゲットはまだキャリブレーションされていません。\n\nまず対象のIDEとAIチャット画面を開いて表示された状態にしてから、「はい」をクリックして開始してください。開始しますか？"
             }
@@ -370,12 +379,47 @@ class QuickBarApp:
             "close_to_tray": self.close_to_tray.get(),
             "auto_start": self.auto_start.get(),
             "theme_follow_system": self.theme_follow_system.get(),
+            "check_update_startup": self.check_update_startup.get(),
             "language": getattr(self, 'language', tk.StringVar(value="zh")).get(),
             "geometry": self.root.geometry(),
             "calibrated": self.config_data.get("state", {}).get("calibrated", False)
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(self.config_data, f, ensure_ascii=False, indent=4)
+
+    def check_update(self, silent=False):
+        """检查 GitHub 最新版本并提示更新 (异步)"""
+        def _task():
+            try:
+                import urllib.request
+                import json as json_lib
+                api_url = "https://api.github.com/repos/ttww1111/QuickBar/releases/latest"
+                req = urllib.request.Request(api_url, headers={"User-Agent": "QuickBar"})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json_lib.loads(response.read().decode())
+                
+                latest_v = data.get("tag_name", "").lstrip("v")
+                current_v = APP_VERSION
+                
+                def v_tuple(v): return tuple(map(int, (v.split(".") if "." in v else [v, "0", "0"])))
+                
+                if v_tuple(latest_v) > v_tuple(current_v):
+                    html_url = data.get("html_url", GITHUB_REPO + "/releases")
+                    # 在主线程中弹出对话框
+                    self.root.after(0, lambda: self._show_update_dialog(current_v, latest_v, html_url))
+                elif not silent:
+                    self.root.after(0, lambda: messagebox.showinfo("QuickBar", self.t("no_update")))
+            except:
+                if not silent:
+                    self.root.after(0, lambda: messagebox.showinfo("QuickBar", self.t("no_update")))
+        
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _show_update_dialog(self, current_v, latest_v, url):
+        from tkinter import messagebox
+        if messagebox.askyesno("QuickBar", f"{self.t('new_version')}\n\n当前版本: v{current_v}\n最新版本: v{latest_v}\n\n是否打开下载页面？"):
+            import webbrowser
+            webbrowser.open(url)
 
 
     def load_target_settings(self):
@@ -1178,6 +1222,16 @@ class QuickBarApp:
                                   font=("Microsoft YaHei", 9), command=toggle_theme_follow)
         theme_cb.pack(side="left")
 
+        # 选项：启动时检查更新
+        f_upd = tk.Frame(win, bg=colors["bg"])
+        f_upd.pack(fill="x", padx=15, pady=6)
+        upd_startup_var = self.check_update_startup
+        upd_cb = tk.Checkbutton(f_upd, text=self.t("check_update_startup"), variable=upd_startup_var,
+                                  bg=colors["bg"], fg=colors["text"], selectcolor=colors["header"],
+                                  activebackground=colors["bg"], activeforeground=colors["text"],
+                                  font=("Microsoft YaHei", 9), command=lambda: self.save_config())
+        upd_cb.pack(side="left")
+
         # 选项：界面语言
         f_lang = tk.Frame(win, bg=colors["bg"])
         f_lang.pack(fill="x", padx=15, pady=6)
@@ -1267,21 +1321,10 @@ class QuickBarApp:
         tk.Label(bottom_frame, text=f"QuickBar v{APP_VERSION}", bg=colors["bg"], fg=colors["subtext"], 
                 font=("Segoe UI", 8)).pack(side="left")
         
-        def check_update():
-            from tkinter import messagebox
-            try:
-                import urllib.request
-                # 尝试从 GitHub API 获取最新版本（需要替换为实际仓库地址）
-                # url = f"{GITHUB_REPO}/releases/latest"
-                # 目前显示占位信息
-                messagebox.showinfo("QuickBar", self.t("no_update"))
-            except:
-                messagebox.showinfo("QuickBar", self.t("no_update"))
-        
         update_btn = tk.Label(bottom_frame, text=self.t("check_update"), bg=colors["bg"], 
                              fg=colors["active"], font=("Microsoft YaHei", 8), cursor="hand2")
         update_btn.pack(side="right")
-        update_btn.bind("<Button-1>", lambda e: check_update())
+        update_btn.bind("<Button-1>", lambda e: self.check_update())
         update_btn.bind("<Enter>", lambda e: update_btn.config(font=("Microsoft YaHei", 8, "underline")))
         update_btn.bind("<Leave>", lambda e: update_btn.config(font=("Microsoft YaHei", 8)))
 
