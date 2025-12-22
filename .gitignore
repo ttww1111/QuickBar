@@ -46,3 +46,5 @@ venv/
 # 编辑器配置
 .vscode/
 .idea/
+
+.spec-workflow/
