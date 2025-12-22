@@ -18,7 +18,7 @@ except ImportError:
     pystray = None
 
 # 版本信息
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "https://github.com/user/quickbar"  # 替换为实际的仓库地址
 
 def resource_path(relative_path):
