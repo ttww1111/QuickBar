@@ -6,6 +6,13 @@ QuickBar 是一款专为开发者设计的**极简、高效**的提示词（Prom
   <img src="assets/Quickbar.png" alt="QuickBar 图标" width="128" height="128">
 </p>
 
+<p align="center">
+  <img src="assets/Quickbar_screenshot_dark.png" alt="深色主题" height="400">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/Quickbar_screenshot_light.png" alt="浅色主题" height="400">
+</p>
+<p align="center"><em>深色主题 &nbsp;|&nbsp; 浅色主题</em></p>
+
 ## ✨ 核心特性
 
 -   **🎯 跨工具支持**：预设支持 VS Code (Claude/Codex), Google Antigravity, 以及原生终端 (PowerShell/CMD)。
