@@ -11,6 +11,12 @@ import socket
 import sys
 from pywinauto import Desktop
 from PIL import Image, ImageTk, ImageGrab
+import logging
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 try:
     import pystray
     from pystray import MenuItem as item
@@ -18,7 +24,7 @@ except ImportError:
     pystray = None
 
 # 版本信息
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPO = "https://github.com/ttww1111/QuickBar"
 
 def resource_path(relative_path):
@@ -59,11 +65,18 @@ def resource_path(relative_path):
         return os.path.join(os.path.dirname(sys.executable), relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# 配置文件路径定义（配置文件不随 exe 打包，放在 exe 同级目录下）
-CONFIG_FILE = "config.json"
-TARGET_CONFIG_FILE = "target_settings.json"
+# 获取程序运行目录（打包模式为 exe 所在目录，开发模式为源码目录）
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+TARGET_CONFIG_FILE = os.path.join(BASE_DIR, "target_settings.json")
+# ASSETS_DIR 用于内置静态资源（如程序图标），由 PyInstaller 打包
 ASSETS_DIR = resource_path("assets")
-ANCHORS_DIR = os.path.join(os.path.abspath("."), "assets", "anchors") # 锚点是运行时生成的
+# ANCHORS_DIR 应该始终相对于程序运行目录（不随 exe 打包，由用户运行时生成）
+ANCHORS_DIR = os.path.join(BASE_DIR, "assets", "anchors")
 
 
 
@@ -229,7 +242,9 @@ class QuickBarApp:
                 "version": "版本", "check_update": "检查更新", "no_update": "已是最新版本",
                 "new_version": "发现新版本！", "check_update_startup": "启动时检查更新",
                 "import_success": "配置导入成功", "export_success": "配置导出成功",
-                "calibration_tip": "检测到您尚未校准当前目标的输入框位置。\n\n请先确保已打开目标 IDE 并点开对应的 AI 对话框（使其可见），然后再点击“是”开始校准。是否开始？"
+                "calibration_tip": "检测到您尚未校准当前目标的输入框位置。\n\n请先确保已打开目标窗口并点开对应的 AI 对话框（使其可见），然后再点击“是”开始校准。",
+                "win_not_found": "未能在系统中找到目标窗口：",
+                "anchor_not_found": "匹配失败：未能在目标窗口内找到校准位置。\n\n解决建议：\n1. 确保目标窗口未被遮挡且处于前台。\n2. 确保已点开 AI 对话框（如 Claude 侧边栏）。\n3. 如果布局有变，请重新点击🎯进行校准。"
             },
             "en": {
                 "settings": "Settings", "column_count": "Columns:", "auto": "Auto", "single": "Single", "double": "Double",
@@ -244,7 +259,9 @@ class QuickBarApp:
                 "version": "Version", "check_update": "Check Update", "no_update": "Already up to date",
                 "new_version": "New version available!", "check_update_startup": "Check for updates on startup",
                 "import_success": "Config imported successfully", "export_success": "Config exported successfully",
-                "calibration_tip": "Calibration not detected for this target.\n\nPlease ensure the target IDE and AI chat window are open and visible before clicking 'Yes'. Start calibration now?"
+                "calibration_tip": "Calibration data not found for the current target.\n\nPlease ensure the window is open and the AI chat is visible before starting.",
+                "win_not_found": "Target window not found:",
+                "anchor_not_found": "Match failed: Could not find the calibration anchor.\n\nTips:\n1. Ensure the window is not obscured.\n2. Ensure the AI sidebar is open.\n3. Recalibrate if the layout has changed."
             },
             "ja": {
                 "settings": "設定", "column_count": "列数:", "auto": "自動", "single": "1列", "double": "2列",
@@ -291,6 +308,13 @@ class QuickBarApp:
             }
         }
         self.prepare_icons()
+        # 确保锚点目录存在
+        if not os.path.exists(ANCHORS_DIR):
+            try:
+                os.makedirs(ANCHORS_DIR, exist_ok=True)
+                logger.info(f"Created anchors directory: {ANCHORS_DIR}")
+            except Exception as e:
+                logger.error(f"Failed to create anchors directory: {e}")
 
     def _init_ui(self):
         """初始 UI 构建"""
@@ -426,8 +450,8 @@ class QuickBarApp:
         """加载各个自动化目标的识别锚点及点击偏移位置"""
         default = {
             "VS Code": {
-                "Claude": {"image": os.path.join(ANCHORS_DIR, "vscode_claude.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*(Visual Studio Code|VS Code).*"},
-                "Codex": {"image": os.path.join(ANCHORS_DIR, "vscode_codex.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*(Visual Studio Code|VS Code).*"}
+                "Claude": {"image": os.path.join(ANCHORS_DIR, "vscode_claude.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*Visual Studio Code.*"},
+                "Codex": {"image": os.path.join(ANCHORS_DIR, "vscode_codex.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*Visual Studio Code.*"}
             },
             "Antigravity": {
                 "Antigravity": {"image": os.path.join(ANCHORS_DIR, "anti_anti.png"), "offset_x": 0, "offset_y": 200, "win_title": ".*(Visual Studio Code|VS Code|QuickBar - Antigravity).*"},
@@ -437,7 +461,7 @@ class QuickBarApp:
             "Native CLI": {
                 "Terminal": {
                     "image": os.path.join(ANCHORS_DIR, "cli_anchor.png"), 
-                    "win_title": "^(?!.*(Claude|Codex)).*(PowerShell|CMD|Terminal|管理员|cmd.exe|powershell.exe).*"
+                    "win_title": "^(?!.*(Antigravity|QuickBar)).*(PowerShell|Windows PowerShell|CMD|cmd.exe|powershell.exe|WindowsTerminal|bash|zsh).*"
                 }
             }
         }
@@ -1688,41 +1712,56 @@ class QuickBarApp:
             return
 
         try:
-            all_wins = Desktop(backend="uia").windows()
+            # 统一使用 win32gui 方案进行初次筛选，获得最精准的类名和可见性控制
             terminal_wins = []
             target_regex = config["win_title"]
-            for win in all_wins:
+            
+            def filter_window(hwnd, results_tuple):
+                results_list, current_ide_mode = results_tuple
+                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                    return
+                
+                title = win32gui.GetWindowText(hwnd)
+                cls = win32gui.GetClassName(hwnd)
+                
+                # 排除 QuickBar 自身
+                if title and "QuickBar" in title and cls == "TkTopLevel": return
+                
+                is_vscode_cls = (cls == "Chrome_WidgetWin_1")
+                is_cmd_cls = (cls == "ConsoleWindowClass")
+                
+                # 只要标题包含关键词，就认为是候选
+                match_title = re.search(target_regex, title, re.I)
+                
+                if current_ide_mode in ["VS Code", "Antigravity"]:
+                    # 在 IDE 模式下，必须是编辑器类窗口
+                    if is_vscode_cls and match_title:
+                        # 额外安全检查：如果标题包含 Antigravity，确保匹配的是 Antigravity 特有的标题
+                        results_list.append(hwnd)
+                        print(f"匹配到目标窗口: {title}")
+                elif current_ide_mode == "Native CLI":
+                    # CLI 模式优先根据类名匹配真正终端，或正则匹配标题
+                    if (is_cmd_cls or match_title) and not is_vscode_cls:
+                        results_list.append(hwnd)
+                        print(f"匹配到终端窗口: {title}")
+
+            # 第一轮扫描
+            matching_hwnds = []
+            win32gui.EnumWindows(filter_window, (matching_hwnds, ide))
+            
+            # 将句柄转换为 pywinauto 窗口对象
+            if matching_hwnds:
+                from pywinauto import Application
+                # 默认使用第一个找到的窗口
                 try:
-                    title, cls = win.window_text(), win.element_info.class_name
-                    if re.search(target_regex, title, re.I) or cls == "ConsoleWindowClass":
-                        # 仅排除明确最小化的窗口
-                        if not win.get_show_state() == 2:
-                            terminal_wins.append(win)
-                except: continue
-            
-            # --- 核心修复：如果 UIA 匹配不到，启用 win32gui 暴力扫描 ---
-            if not terminal_wins and win32gui:
-                print(f"UIA 扫描未果，正在启动 win32 暴力扫描模式... Regex: {target_regex}")
-                def enum_callback(hwnd, results):
-                    if win32gui.IsWindowVisible(hwnd):
-                        t = win32gui.GetWindowText(hwnd)
-                        c = win32gui.GetClassName(hwnd)
-                        if t and (re.search(target_regex, t, re.I) or c == "ConsoleWindowClass"):
-                            results.append((hwnd, t))
-                
-                win32_results = []
-                win32gui.EnumWindows(enum_callback, win32_results)
-                
-                if win32_results:
-                    from pywinauto import Application
-                    for hwnd, t in win32_results:
-                        print(f"win32 模式找到匹配: {t} (HWND: {hwnd})")
-                        # 将 win32 句柄包装成 pywinauto 窗口对象
-                        app_win32 = Application(backend="win32").connect(handle=hwnd)
-                        terminal_wins.append(app_win32.window(handle=hwnd))
-            
+                    app = Application(backend="win32").connect(handle=matching_hwnds[0])
+                    terminal_wins.append(app.window(handle=matching_hwnds[0]))
+                except: pass
+
             if not terminal_wins: 
-                print(f"!!! 最终仍未能匹配到任何目标窗口。")
+                msg = f"{self.t('win_not_found')} [{ide}]\n\n请确保它已打开，且没有被最小化（缩小到任务栏）。"
+                logger.warning(f"Window not found: {target_regex}")
+                messagebox.showwarning("QuickBar", msg)
                 return
             
             target_win = terminal_wins[0]
@@ -1756,26 +1795,35 @@ class QuickBarApp:
                             self.root.after(100, self.start_calibration)
                         return
 
-                    loc = pyautogui.locateOnScreen(config["image"], confidence=0.7)
-                    if loc:
-                        pyautogui.click(loc.left + loc.width/2 + config.get("offset_x", 0), 
-                                        loc.top + loc.height/2 + config["offset_y"])
-                        time.sleep(0.05)
-                        # 增加清空逻辑的容错
-                        pyautogui.hotkey('ctrl', 'a')
-                        time.sleep(0.05)
-                        pyautogui.press('backspace') 
-                        pyperclip.copy(prompt)
-                        time.sleep(0.05)
-                        pyautogui.hotkey('ctrl', 'v') 
-                        if self.auto_send.get(): 
+                    # 在执行截图识别前，确保激活操作已成功且窗口就在当前视野内
+                    try:
+                        loc = pyautogui.locateOnScreen(config["image"], confidence=0.7)
+                        if loc:
+                            pyautogui.click(loc.left + loc.width/2 + config.get("offset_x", 0), 
+                                            loc.top + loc.height/2 + config["offset_y"])
                             time.sleep(0.05)
-                            pyautogui.press('enter')
-                        
-                        # 完成后返回原始位置
-                        pyautogui.moveTo(old_pos)
-                    else:
-                        print(f"未能在此窗口找到锚点图像: {config['image']}")
+                            # 增加清空逻辑的容错
+                            pyautogui.hotkey('ctrl', 'a')
+                            time.sleep(0.05)
+                            pyautogui.press('backspace') 
+                            pyperclip.copy(prompt)
+                            time.sleep(0.05)
+                            pyautogui.hotkey('ctrl', 'v') 
+                            if self.auto_send.get(): 
+                                time.sleep(0.05)
+                                pyautogui.press('enter')
+                            
+                            # 完成后返回原始位置
+                            pyautogui.moveTo(old_pos)
+                        else:
+                            msg = self.t('anchor_not_found')
+                            logger.warning(f"{msg}: {config['image']}")
+                            messagebox.showwarning("QuickBar", msg)
+                    except (pyautogui.ImageNotFoundException, Exception) as e:
+                        # PyAutoGUI 在新版本中找不到图片会直接抛出 ImageNotFoundException
+                        msg = self.t('anchor_not_found')
+                        logger.warning(f"{msg}: {config['image']} (Error: {e})")
+                        messagebox.showwarning("QuickBar", msg)
                 except Exception as e:
                     import traceback
                     print(f"识别或模拟点击失败详细日志:\n{traceback.format_exc()}")
@@ -1979,7 +2027,19 @@ class ScreenshotDialog:
     def on_drag(self, e): self.canvas.coords(self.rect, self.start_x, self.start_y, e.x, e.y)
     def on_release(self, e):
         x1, y1, x2, y2 = min(self.start_x, e.x), min(self.start_y, e.y), max(self.start_x, e.x), max(self.start_y, e.y)
-        if x2-x1 > 5: ImageGrab.grab(bbox=(x1, y1, x2, y2)).save(self.filename); self.success = True; self.z_win.destroy(); self.root.destroy()
+        if x2-x1 > 5:
+            try:
+                # 显式截取并保存
+                img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+                img.save(self.filename)
+                logger.info(f"Screenshot saved to: {self.filename}")
+                self.success = True
+            except Exception as ex:
+                logger.error(f"Failed to save screenshot: {ex}")
+                messagebox.showerror("错误", f"截图保存失败: {ex}\n路径: {self.filename}")
+            
+            self.z_win.destroy()
+            self.root.destroy()
 
 class LocationDialog:
     def __init__(self, parent, image_path, prompt):
