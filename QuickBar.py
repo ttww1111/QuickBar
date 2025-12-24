@@ -24,7 +24,7 @@ except ImportError:
     pystray = None
 
 # 版本信息
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO = "https://github.com/ttww1111/QuickBar"
 
 def resource_path(relative_path):
@@ -454,9 +454,9 @@ class QuickBarApp:
                 "Codex": {"image": os.path.join(ANCHORS_DIR, "vscode_codex.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*Visual Studio Code.*"}
             },
             "Antigravity": {
-                "Antigravity": {"image": os.path.join(ANCHORS_DIR, "anti_anti.png"), "offset_x": 0, "offset_y": 200, "win_title": ".*(Visual Studio Code|VS Code|QuickBar - Antigravity).*"},
-                "Claude": {"image": os.path.join(ANCHORS_DIR, "anti_claude.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*(Visual Studio Code|VS Code|QuickBar - Antigravity).*"},
-                "Codex": {"image": os.path.join(ANCHORS_DIR, "anti_codex.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*(Visual Studio Code|VS Code|QuickBar - Antigravity).*"}
+                "Antigravity": {"image": os.path.join(ANCHORS_DIR, "anti_anti.png"), "offset_x": 0, "offset_y": 200, "win_title": ".*Antigravity.*"},
+                "Claude": {"image": os.path.join(ANCHORS_DIR, "anti_claude.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*Antigravity.*"},
+                "Codex": {"image": os.path.join(ANCHORS_DIR, "anti_codex.png"), "offset_x": 0, "offset_y": -45, "win_title": ".*Antigravity.*"}
             },
             "Native CLI": {
                 "Terminal": {
