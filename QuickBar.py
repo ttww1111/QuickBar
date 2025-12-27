@@ -12,6 +12,9 @@ import sys
 from pywinauto import Desktop
 from PIL import Image, ImageTk, ImageGrab
 import logging
+import ctypes
+from ctypes import wintypes
+import pywintypes
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,7 +27,7 @@ except ImportError:
     pystray = None
 
 # 版本信息
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.5"
 GITHUB_REPO = "https://github.com/ttww1111/QuickBar"
 
 def resource_path(relative_path):
@@ -85,6 +88,8 @@ try:
     import win32ui
     import win32con
     import win32api
+    import win32process
+    import psutil
 except ImportError:
     win32gui = None
 
@@ -161,6 +166,13 @@ class QuickBarApp:
     def __init__(self, root):
         self.root = root
         self.root.title("QuickBar")
+        
+        # 0. 权限检查：讯飞控制通常需要管理员权限才能在所有窗口生效
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            if not is_admin:
+                logger.warning("建议以管理员身份运行 QuickBar，以确保 Win+H 拦截及讯飞控制在所有场景下稳定生效。")
+        except: pass
         self.root.overrideredirect(True) # 移除原生边框以实现 UI 美化
         self.root.attributes("-alpha", 0.95) # 设置微透明度提升科技感
         
@@ -178,11 +190,19 @@ class QuickBarApp:
         self._init_variables(saved_state)
         self._init_ui()
         self._bind_events()
+        
+        # 预同步热键开关状态，优化钩子响应性能
+        self._ifly_active_sync = (self.win_h_action.get() == "ifly")
 
         # 4. 启动时检查更新
         if self.check_update_startup.get():
             # 延迟 3 秒检查，以免影响启动速度感
             self.root.after(3000, lambda: self.check_update(silent=True))
+
+        # 5. 启动键盘钩子 (如果开启了讯飞热键)
+        self.keyboard_hook_thread = None
+        if self.win_h_action.get() == "ifly":
+            self._start_keyboard_hook()
 
     def _init_variables(self, saved_state):
         """初始化运行时的内部变量"""
@@ -198,6 +218,7 @@ class QuickBarApp:
         self.auto_start = tk.BooleanVar(value=saved_state.get("auto_start", False))  # 开机自启
         self.theme_follow_system = tk.BooleanVar(value=saved_state.get("theme_follow_system", True))  # 主题跟随系统
         self.check_update_startup = tk.BooleanVar(value=saved_state.get("check_update_startup", True))  # 启动时检查更新
+        self.win_h_action = tk.StringVar(value=saved_state.get("win_h_action", "system"))  # Win+H 唤起方式: system/ifly
         
         # 如果启用了主题跟随系统，则检测并应用系统主题
         if self.theme_follow_system.get():
@@ -237,14 +258,18 @@ class QuickBarApp:
                 "confirm_delete": "确认删除", "delete_prompt": "是否删除指令", "yes": "是", "no": "否",
                 "add_command": "添加新指令", "edit_command": "编辑指令", "name": "名称:", "content": "内容:",
                 "save": "保存", "cancel": "取消", "calibration": "输入框校准", "settings_btn": "打开设置",
-                "auto_send": "自动发送", "pin": "切换窗口置顶", "show_quickbar": "显示 QuickBar", "exit": "退出",
+                "auto_send": "发送", "pin": "切换窗口置顶", "show_quickbar": "显示 QuickBar", "exit": "退出",
                 "import_config": "导入配置", "export_config": "导出配置", "about": "关于",
                 "version": "版本", "check_update": "检查更新", "no_update": "已是最新版本",
                 "new_version": "发现新版本！", "check_update_startup": "启动时检查更新",
+                "win_h_action": "Win+H 唤起方式:", "system": "系统默认", "ifly": "讯飞语音",
                 "import_success": "配置导入成功", "export_success": "配置导出成功",
                 "calibration_tip": "检测到您尚未校准当前目标的输入框位置。\n\n请先确保已打开目标窗口并点开对应的 AI 对话框（使其可见），然后再点击“是”开始校准。",
                 "win_not_found": "未能在系统中找到目标窗口：",
-                "anchor_not_found": "匹配失败：未能在目标窗口内找到校准位置。\n\n解决建议：\n1. 确保目标窗口未被遮挡且处于前台。\n2. 确保已点开 AI 对话框（如 Claude 侧边栏）。\n3. 如果布局有变，请重新点击🎯进行校准。"
+                "anchor_not_found": "匹配失败：未能在目标窗口内找到校准位置。\n\n解决建议：\n1. 确保目标窗口未被遮挡且处于前台。\n2. 确保已点开 AI 对话框（如 Claude 侧边栏）。\n3. 如果布局有变，请重新点击🎯进行校准。",
+                "btn_name": "按钮名称:", "cmd_type": "指令类型:", "text_mode": "纯文本", "key_mode": "快捷键",
+                "cmd_content": "指令内容:", "key_content": "快捷键内容:", "key_tip": "按 Backspace 清空",
+                "ifly_not_found": "未找到讯飞执行程序，请检查安装路径。"
             },
             "en": {
                 "settings": "Settings", "column_count": "Columns:", "auto": "Auto", "single": "Single", "double": "Double",
@@ -258,10 +283,14 @@ class QuickBarApp:
                 "import_config": "Import Config", "export_config": "Export Config", "about": "About",
                 "version": "Version", "check_update": "Check Update", "no_update": "Already up to date",
                 "new_version": "New version available!", "check_update_startup": "Check for updates on startup",
+                "win_h_action": "Win+H Action:", "system": "Default", "ifly": "iFlyVoice",
                 "import_success": "Config imported successfully", "export_success": "Config exported successfully",
                 "calibration_tip": "Calibration data not found for the current target.\n\nPlease ensure the window is open and the AI chat is visible before starting.",
                 "win_not_found": "Target window not found:",
-                "anchor_not_found": "Match failed: Could not find the calibration anchor.\n\nTips:\n1. Ensure the window is not obscured.\n2. Ensure the AI sidebar is open.\n3. Recalibrate if the layout has changed."
+                "anchor_not_found": "Match failed: Could not find the calibration anchor.\n\nTips:\n1. Ensure the window is not obscured.\n2. Ensure the AI sidebar is open.\n3. Recalibrate if the layout has changed.",
+                "btn_name": "Button Name:", "cmd_type": "Command Type:", "text_mode": "Text", "key_mode": "Hotkey",
+                "cmd_content": "Command:", "key_content": "Hotkey Content:", "key_tip": "Press Backspace to clear",
+                "ifly_not_found": "iFlyVoice executable not found."
             },
             "ja": {
                 "settings": "設定", "column_count": "列数:", "auto": "自動", "single": "1列", "double": "2列",
@@ -275,8 +304,12 @@ class QuickBarApp:
                 "import_config": "設定インポート", "export_config": "設定エクスポート", "about": "について",
                 "version": "バージョン", "check_update": "更新確認", "no_update": "最新版です",
                 "new_version": "新しいバージョンがあります！", "check_update_startup": "起動時に更新を確認",
+                "win_h_action": "Win+H 呼び出し:", "system": "システムデフォルト", "ifly": "訊飛音声",
                 "import_success": "設定をインポートしました", "export_success": "設定をエクスポートしました",
-                "calibration_tip": "現在のターゲットはまだキャリブレーションされていません。\n\nまず対象のIDEとAIチャット画面を開いて表示された状態にしてから、「はい」をクリックして開始してください。開始しますか？"
+                "calibration_tip": "現在のターゲットはまだキャリブレーションされていません。\n\nまず対象のIDEとAIチャット画面を開いて表示された状态にしてから、「はい」をクリックして开始してください。开始しますか？",
+                "btn_name": "ボタン名:", "cmd_type": "コマンド型:", "text_mode": "テキスト", "key_mode": "ホットキー",
+                "cmd_content": "コマンド内容:", "key_content": "ホットキー内容:", "key_tip": "BackSpaceで消去",
+                "ifly_not_found": "讯飞音声アプリが見つかりません"
             }
         }
 
@@ -285,8 +318,8 @@ class QuickBarApp:
             self.root.geometry(saved_state["geometry"])
             print(f"恢复窗口位置: {saved_state['geometry']}")
         else:
-            # 首次打开时居中显示
-            win_w, win_h = 200, 550
+            # 首次打开时居中显示 (增加宽度以容纳新增的讯飞开关)
+            win_w, win_h = 260, 550
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
             x = (screen_w - win_w) // 2
@@ -404,6 +437,7 @@ class QuickBarApp:
             "auto_start": self.auto_start.get(),
             "theme_follow_system": self.theme_follow_system.get(),
             "check_update_startup": self.check_update_startup.get(),
+            "win_h_action": self.win_h_action.get(),
             "language": getattr(self, 'language', tk.StringVar(value="zh")).get(),
             "geometry": self.root.geometry(),
             "calibrated": self.config_data.get("state", {}).get("calibrated", False)
@@ -509,16 +543,55 @@ class QuickBarApp:
         except Exception as e:
             print(f"设置开机自启失败: {e}")
 
-    def set_ide(self, ide):
-        """切换目标 IDE 容器"""
-        self.current_ide.set(ide)
-        available_ais = list(self.target_settings[ide].keys())
-        self.current_ai.set(available_ais[0]) # 切换 IDE 时默认选中第一个附属 AI
-        self.save_config(); self.setup_ui()
+    def set_ide(self, ide_name):
+        self.current_ide.set(ide_name)
+        # 自动切换到该 IDE 的第一个 AI
+        available_ais = list(self.target_settings[ide_name].keys())
+        if available_ais:
+            self.current_ai.set(available_ais[0])
+            
+        # 切换 IDE 结构（特别是 CLI 显隐）时全量刷新最为安全，同时也刷新影子容器引用
+        self.setup_ui()
+        self.save_config()
 
-    def set_ai(self, ai):
-        """切换具体 AI 目标"""
-        self.current_ai.set(ai); self.save_config(); self.setup_ui()
+    def set_ai(self, ai_name):
+        self.current_ai.set(ai_name)
+        # AI 切换使用局部刷新，保证零闪烁
+        self._update_selection_visuals()
+        self.refresh_cmd_list()
+        self.auto_adjust_height()
+        self.save_config()
+
+    def _update_selection_visuals(self):
+        """局部刷新：直接修改现有组件的颜色，响应极快且无闪烁"""
+        colors = self.themes[self.current_theme.get()]
+        curr_ide = self.current_ide.get()
+        curr_ai = self.current_ai.get()
+        
+        def update_recursive(parent):
+            for child in parent.winfo_children():
+                # 通过 _val_type 标识识别按钮
+                if isinstance(child, tk.Label) and hasattr(child, '_val_type'):
+                    val = getattr(child, '_val', '')
+                    is_sel = (val == curr_ide if child._val_type == 'ide' else val == curr_ai)
+                    
+                    # 更新文字颜色
+                    child.config(fg=colors["text_active"] if is_sel else colors["subtext"])
+                    
+                    # 更新父 Frame 的高亮边框
+                    try:
+                        master = child.master
+                        if isinstance(master, tk.Frame):
+                            # 通过检查是否有 highlightthickness 属性来判断
+                            master.config(highlightbackground=colors["active"] if is_sel else colors["header"])
+                    except: pass
+                elif isinstance(child, tk.Frame):
+                    update_recursive(child)
+        
+        # 核心修复：确保 main_container 存在且有效
+        container = getattr(self, 'main_container', None)
+        if container and container.winfo_exists():
+            update_recursive(container)
 
     def toggle_theme(self):
         """在 Dark/Light 两种主题间一键切换"""
@@ -826,13 +899,33 @@ class QuickBarApp:
         return canvas.create_polygon(points, **kwargs, smooth=True)
 
     def setup_ui(self):
-        """重绘主界面 UI 组件"""
-        for widget in self.root.winfo_children(): widget.destroy()
+        """回归稳定刷新架构：清场并重建，但保留设置窗口，并通过 update_idletasks 压制闪烁"""
         colors = self.themes[self.current_theme.get()]
+        
+        # 1. 记录设置窗口，防止误删
+        swin = getattr(self, '_settings_window', None)
+        
+        # 2. 彻底清场 (除了设置窗口)
+        for widget in self.root.winfo_children():
+            if widget != swin:
+                widget.destroy()
+        
+        # 3. 设置主背景
         self.root.configure(bg=colors["bg"])
-
-        # 构建头部区域 (标题栏)
-        header = tk.Frame(self.root, bg=colors["header"], height=26)
+        
+        # 4. 构建主界面容器，并记录引用以便局部刷新
+        self.main_container = tk.Frame(self.root, bg=colors["bg"])
+        self.main_container.pack(fill="both", expand=True)
+        self._build_main_content(self.main_container)
+        
+        # 5. 如果设置窗口开着，原地同步其内部状态
+        if swin and swin.winfo_exists():
+            self._refresh_settings_ui()
+            
+    def _build_main_content(self, container):
+        """构建主界面内容，支持挂载到不同容器"""
+        colors = self.themes[self.current_theme.get()]
+        header = tk.Frame(container, bg=colors["header"], height=26)
         header.pack(fill="x")
         header.pack_propagate(False)
 
@@ -914,7 +1007,7 @@ class QuickBarApp:
 
 
         # 1. 顶部模式选择区 (图标化切换)
-        top_frame = tk.Frame(self.root, bg=colors["bg"])
+        top_frame = tk.Frame(container, bg=colors["bg"])
         top_frame.pack(fill="x", padx=10, pady=(10, 5))
         
         # IDE 切换
@@ -976,7 +1069,10 @@ class QuickBarApp:
 
             # 将点击事件绑定到 Frame 和 Label，确保整个区域可点
             for widget in (f, lbl):
-                widget.bind("<Button-1>", lambda e, i=ide: [self.set_ide(i), "break"][-1])
+                # 在 Label 上标记值，以便 _update_selection_visuals 局部定位
+                lbl._val = ide
+                lbl._val_type = 'ide'
+                widget.bind("<Button-1>", lambda e, n=ide: self.set_ide(n))
                 ToolTip(widget, ide) # 同时为 Frame 和 Label 绑定 ToolTip
 
 
@@ -984,7 +1080,7 @@ class QuickBarApp:
 
         # AI 切换
         if self.current_ide.get() != "Native CLI":
-            ai_frame = tk.Frame(self.root, bg=colors["bg"])
+            ai_frame = tk.Frame(container, bg=colors["bg"])
             ai_frame.pack(fill="x", padx=10, pady=2)
             
             # AI 图标映射
@@ -1033,7 +1129,10 @@ class QuickBarApp:
                 b.pack(fill="x")
                 # 为 Frame 和 Label 同时绑定点击和 ToolTip
                 for widget in (af, b):
-                    widget.bind("<Button-1>", lambda e, i=ai: [self.set_ai(i), "break"][-1])
+                    # 在 Label 上标记值，以便 _update_selection_visuals 局部定位
+                    b._val = ai
+                    b._val_type = 'ai'
+                    widget.bind("<Button-1>", lambda e, n=ai: self.set_ai(n))
                     ToolTip(widget, ai)
 
 
@@ -1041,13 +1140,13 @@ class QuickBarApp:
 
 
         # 2. 中间指令列表区 (取消 expand，方便高度自适应)
-        self.cmd_container = tk.Frame(self.root, bg=colors["bg"])
+        self.cmd_container = tk.Frame(container, bg=colors["bg"])
         self.cmd_container.pack(fill="x", expand=False, pady=5, padx=10)
         self.refresh_cmd_list()
 
 
-        # 3. 底部集成工具栏 (重新排列：自动发送 → 加号 → 校准 → 设置)
-        footer = tk.Frame(self.root, bg=colors["header"])
+        # 3. 底部集成工具栏 (回归自然布局，通过非对称 pady 实现像素级对齐)
+        footer = tk.Frame(container, bg=colors["header"])
         footer.pack(fill="x", side="bottom")
 
         # 1. 自动发送组 (最左侧)
@@ -1060,12 +1159,14 @@ class QuickBarApp:
         check_color = colors["active"] if is_auto else colors["subtext"]
         
         check_box = tk.Label(auto_frame, text=check_icon, bg=colors["header"], fg=check_color,
-                            font=("Segoe UI Symbol", 12), cursor="hand2", pady=5)
-        check_box.pack(side="left")
+                            font=("Segoe UI Symbol", 12), cursor="hand2", padx=0, bd=0)
+        # 视觉修正：复选框字体偏下，通过 pady 上移 3 像素
+        check_box.pack(side="left", pady=(4, 6))
         
-        auto_lbl = tk.Label(auto_frame, text="自动发送", bg=colors["header"], fg=colors["subtext"], 
-                 font=("Microsoft YaHei", 8), cursor="hand2", pady=5)
-        auto_lbl.pack(side="left", padx=0)
+        auto_lbl = tk.Label(auto_frame, text="发送", bg=colors["header"], fg=colors["subtext"], 
+                          font=("Microsoft YaHei", 8), cursor="hand2", padx=0, bd=0)
+        # 视觉修正：文字恢复完全垂直居中 (5, 5)
+        auto_lbl.pack(side="left", padx=(2, 0), pady=5) 
         
         def toggle_auto(e=None):
             self.auto_send.set(not self.auto_send.get())
@@ -1089,9 +1190,14 @@ class QuickBarApp:
             w.bind("<Enter>", on_auto_enter)
             w.bind("<Leave>", on_auto_leave)
 
-        # 底部右侧按钮（按照加号、校准、设置的顺序从左到右）
-        # 由于使用 side="right"uff0c需要反向声明
+        ToolTip(auto_frame, "发送命令后自动紧接 Enter 键")
+
+        # 1.5 讯飞模式状态显示 (赋予 ID 以便局部刷新)
+        self.ifly_status_container = tk.Frame(footer, bg=colors["header"])
+        self.ifly_status_container.pack(side="left", padx=(12, 0))
+        self.update_ifly_status_display()
         
+        # 修正：所有右侧图标统一采用 (8, 3) 的下沉比例，确保与左侧文字齐平
         # 4. 设置按钮（最右）
         set_btn = tk.Label(footer, text="\uE713", bg=colors["header"], fg=colors["subtext"],
                           font=("Segoe MDL2 Assets", 9), cursor="hand2", padx=4, pady=5)
@@ -1122,143 +1228,239 @@ class QuickBarApp:
         self.auto_adjust_height()
 
 
+    def update_ifly_status_display(self):
+        """局部刷新：仅更新底栏讯飞状态，不影响其他组件"""
+        if not hasattr(self, 'ifly_status_container'): return
+        
+        # 清空容器内容而不销毁容器本身
+        for w in self.ifly_status_container.winfo_children(): w.destroy()
+        
+        if self.win_h_action.get() == "ifly":
+            colors = self.themes[self.current_theme.get()]
+            tk.Label(self.ifly_status_container, text="\uE720", bg=colors["header"], fg=colors["active"],
+                     font=("Segoe MDL2 Assets", 9), padx=0, bd=0).pack(side="left", pady=(6, 5)) 
+            tk.Label(self.ifly_status_container, text="讯飞", bg=colors["header"], fg=colors["subtext"],
+                     font=("Microsoft YaHei", 8), padx=0, bd=0).pack(side="left", fill="y", padx=(2, 0), pady=5) 
+            ToolTip(self.ifly_status_container, "当前 Win+H 已映射至讯飞语音")
+        else:
+            # 系统模式下隐藏容器
+            pass
+
+    def _refresh_settings_ui(self):
+        """原地刷新设置窗口内容，不改变窗口位置且不闪烁"""
+        if not hasattr(self, '_settings_window') or not self._settings_window or not self._settings_window.winfo_exists():
+            return
+        
+        win = self._settings_window
+        colors = self.themes[self.current_theme.get()]
+        # 同样使用影子容器替换技术
+        new_content = tk.Frame(win, bg=colors["bg"])
+        self._render_settings_widgets(new_content)
+        
+        old_content = getattr(self, 'settings_container', None)
+        self.settings_container = new_content
+        # 使用 place 实现 0 抖动全量覆盖
+        self.settings_container.place(x=0, y=0, relwidth=1, relheight=1)
+        
+        if old_content:
+            # 延迟 100ms 销毁，确保新界面完全渲染
+            self.root.after(100, lambda c=old_content: c.destroy() if c.winfo_exists() else None)
+        
+        win.configure(bg=colors["bg"])
+
     def open_settings(self):
         """打开全局设置面板"""
-        colors = self.themes[self.current_theme.get()]
+        if hasattr(self, '_settings_window') and self._settings_window and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            return
+            
         win = tk.Toplevel(self.root)
+        self._settings_window = win
         win.title("QuickBar " + self.t("settings"))
         
-        # 智能计算设置窗口位置，防止超出屏幕边缘
-        set_w, set_h = 300, 420
+        set_w, set_h = 300, 360
         screen_w = win.winfo_screenwidth()
         screen_h = win.winfo_screenheight()
-        
-        # 初始偏置位置
-        target_x = self.root.winfo_x() + 20
-        target_y = self.root.winfo_y() + 30
-        
-        # 如果右侧超出屏幕，则向左偏移
-        if target_x + set_w > screen_w:
-            target_x = self.root.winfo_x() - set_w - 5
-            
-        # 如果底部超出屏幕，则向上偏移
-        if target_y + set_h > screen_h:
-            target_y = screen_h - set_h - 40
-            
-        # 确保不会超出左侧和顶部边缘
-        target_x = max(0, target_x)
-        target_y = max(0, target_y)
-        
-        win.geometry(f"{set_w}x{set_h}+{target_x}+{target_y}")
-        win.configure(bg=colors["bg"])
-        win.attributes("-topmost", True)
+        tx = max(0, min(self.root.winfo_x() + 20, screen_w - set_w))
+        ty = max(0, min(self.root.winfo_y() + 30, screen_h - set_h - 40))
+        win.geometry(f"{set_w}x{set_h}+{tx}+{ty}")
         win.resizable(False, False)
+        win.attributes("-topmost", True)
         win.grab_set()
+        
+        # 初始化主容器并显式设置背景色
+        colors = self.themes[self.current_theme.get()]
+        self.settings_container = tk.Frame(win, bg=colors["bg"])
+        self.settings_container.pack(fill="both", expand=True)
+        self._render_settings_widgets(self.settings_container)
+
+    def _render_settings_widgets(self, win):
+        """实际渲染设置项"""
+        colors = self.themes[self.current_theme.get()]
 
         tk.Label(win, text="⚙️ " + self.t("settings"), bg=colors["bg"], fg=colors["active"], 
                 font=("Microsoft YaHei", 10, "bold")).pack(pady=10)
 
+
+        def update_group_active(frame, current_val):
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    is_sel = (getattr(child, '_val', None) == current_val)
+                    child.config(
+                        bg=colors["active"] if is_sel else colors["btn"],
+                        fg="white" if is_sel else colors["text"])
+
         # 选项：指令按钮列数
         f_col = tk.Frame(win, bg=colors["bg"])
-        f_col.pack(fill="x", padx=15, pady=6)
+        f_col.pack(fill="x", padx=15, pady=4)
         tk.Label(f_col, text=self.t("column_count"), bg=colors["bg"], fg=colors["text"], 
                 font=("Microsoft YaHei", 9)).pack(side="left")
         
-        col_options = [("auto", self.t("auto")), ("1", self.t("single")), ("2", self.t("double"))]
         col_frame = tk.Frame(f_col, bg=colors["bg"])
         col_frame.pack(side="right")
         
         def on_col_change(val):
             self.column_count.set(val)
             self.save_config()
-            self.setup_ui()
+            update_group_active(col_frame, val)
+            self.refresh_cmd_list()
+            # 切换列数后必须触发高度调整
+            self.auto_adjust_height()
         
-        for val, label in col_options:
-            is_selected = self.column_count.get() == val
+        for val, label in [("auto", self.t("auto")), ("1", self.t("single")), ("2", self.t("double"))]:
             btn = tk.Label(col_frame, text=label, 
-                          bg=colors["active"] if is_selected else colors["btn"],
-                          fg="white" if is_selected else colors["text"], 
+                          bg=colors["active"] if self.column_count.get() == val else colors["btn"],
+                          fg="white" if self.column_count.get() == val else colors["text"], 
                           font=("Microsoft YaHei", 8), padx=6, pady=2, cursor="hand2")
+            btn._val = val
             btn.pack(side="left", padx=2)
-            btn.bind("<Button-1>", lambda e, v=val: [on_col_change(v), win.destroy()])
+            btn.bind("<Button-1>", lambda e, v=val: on_col_change(v))
 
         # 选项：最小化位置
         f1 = tk.Frame(win, bg=colors["bg"])
-        f1.pack(fill="x", padx=15, pady=6)
+        f1.pack(fill="x", padx=15, pady=4)
         tk.Label(f1, text=self.t("minimize_to"), bg=colors["bg"], fg=colors["text"], 
                 font=("Microsoft YaHei", 9)).pack(side="left")
         
-        min_options = [("taskbar", self.t("taskbar")), ("tray", self.t("tray"))]
         min_frame = tk.Frame(f1, bg=colors["bg"])
         min_frame.pack(side="right")
         
         def on_min_change(val):
             self.minimize_to = val
             self.save_config()
+            update_group_active(min_frame, val)
         
-        for val, label in min_options:
-            is_selected = self.minimize_to == val
+        for val, label in [("taskbar", self.t("taskbar")), ("tray", self.t("tray"))]:
             btn = tk.Label(min_frame, text=label, 
-                          bg=colors["active"] if is_selected else colors["btn"],
-                          fg="white" if is_selected else colors["text"], 
+                          bg=colors["active"] if self.minimize_to == val else colors["btn"],
+                          fg="white" if self.minimize_to == val else colors["text"], 
                           font=("Microsoft YaHei", 8), padx=8, pady=2, cursor="hand2")
+            btn._val = val
             btn.pack(side="left", padx=2)
-            btn.bind("<Button-1>", lambda e, v=val: [on_min_change(v), win.destroy(), self.setup_ui()])
+            btn.bind("<Button-1>", lambda e, v=val: on_min_change(v))
 
         # 选项：关闭时最小化到托盘
         f_close = tk.Frame(win, bg=colors["bg"])
-        f_close.pack(fill="x", padx=15, pady=6)
+        f_close.pack(fill="x", padx=15, pady=4)
+        
         close_var = self.close_to_tray
-        def toggle_close():
+        def toggle_close_ui(e=None):
             close_var.set(not close_var.get())
+            status_lbl.config(text="☑" if close_var.get() else "☐", 
+                             fg=colors["active"] if close_var.get() else colors["subtext"])
             self.save_config()
-        close_cb = tk.Checkbutton(f_close, text=self.t("close_to_tray"), variable=close_var,
-                                  bg=colors["bg"], fg=colors["text"], selectcolor=colors["header"],
-                                  activebackground=colors["bg"], activeforeground=colors["text"],
-                                  font=("Microsoft YaHei", 9), command=lambda: self.save_config())
-        close_cb.pack(side="left")
+
+        status_lbl = tk.Label(f_close, text="☑" if close_var.get() else "☐", 
+                             bg=colors["bg"], fg=colors["active"] if close_var.get() else colors["subtext"],
+                             font=("Segoe UI Symbol", 11), cursor="hand2")
+        status_lbl.pack(side="left")
+        
+        txt_lbl = tk.Label(f_close, text=self.t("close_to_tray"), bg=colors["bg"], fg=colors["text"],
+                          font=("Microsoft YaHei", 9), cursor="hand2")
+        txt_lbl.pack(side="left", padx=5)
+        
+        for w in (status_lbl, txt_lbl):
+            w.bind("<Button-1>", toggle_close_ui)
 
         # 选项：开机自启动
         f_auto = tk.Frame(win, bg=colors["bg"])
-        f_auto.pack(fill="x", padx=15, pady=6)
+        f_auto.pack(fill="x", padx=15, pady=4)
+        
         auto_var = self.auto_start
-        def toggle_auto_start():
+        def toggle_auto_ui(e=None):
+            auto_var.set(not auto_var.get())
             self._set_auto_start(auto_var.get())
+            auto_status_lbl.config(text="☑" if auto_var.get() else "☐", 
+                                  fg=colors["active"] if auto_var.get() else colors["subtext"])
             self.save_config()
-        auto_cb = tk.Checkbutton(f_auto, text=self.t("auto_start"), variable=auto_var,
-                                 bg=colors["bg"], fg=colors["text"], selectcolor=colors["header"],
-                                 activebackground=colors["bg"], activeforeground=colors["text"],
-                                 font=("Microsoft YaHei", 9), command=toggle_auto_start)
-        auto_cb.pack(side="left")
 
-        # 选项：主题跟随系统
-        f_theme = tk.Frame(win, bg=colors["bg"])
-        f_theme.pack(fill="x", padx=15, pady=6)
-        theme_var = self.theme_follow_system
-        def toggle_theme_follow():
-            if theme_var.get():
-                self._apply_system_theme()
-                self.setup_ui()
-            self.save_config()
-        theme_cb = tk.Checkbutton(f_theme, text=self.t("theme_follow"), variable=theme_var,
-                                  bg=colors["bg"], fg=colors["text"], selectcolor=colors["header"],
-                                  activebackground=colors["bg"], activeforeground=colors["text"],
-                                  font=("Microsoft YaHei", 9), command=toggle_theme_follow)
-        theme_cb.pack(side="left")
+        auto_status_lbl = tk.Label(f_auto, text="☑" if auto_var.get() else "☐", 
+                                  bg=colors["bg"], fg=colors["active"] if auto_var.get() else colors["subtext"],
+                                  font=("Segoe UI Symbol", 11), cursor="hand2")
+        auto_status_lbl.pack(side="left")
+        
+        auto_txt_lbl = tk.Label(f_auto, text=self.t("auto_start"), bg=colors["bg"], fg=colors["text"],
+                               font=("Microsoft YaHei", 9), cursor="hand2")
+        auto_txt_lbl.pack(side="left", padx=5)
+        
+        for w in (auto_status_lbl, auto_txt_lbl):
+            w.bind("<Button-1>", toggle_auto_ui)
 
         # 选项：启动时检查更新
         f_upd = tk.Frame(win, bg=colors["bg"])
-        f_upd.pack(fill="x", padx=15, pady=6)
-        upd_startup_var = self.check_update_startup
-        upd_cb = tk.Checkbutton(f_upd, text=self.t("check_update_startup"), variable=upd_startup_var,
-                                  bg=colors["bg"], fg=colors["text"], selectcolor=colors["header"],
-                                  activebackground=colors["bg"], activeforeground=colors["text"],
-                                  font=("Microsoft YaHei", 9), command=lambda: self.save_config())
-        upd_cb.pack(side="left")
+        f_upd.pack(fill="x", padx=15, pady=4)
+        
+        upd_var = self.check_update_startup
+        def toggle_upd_ui(e=None):
+            upd_var.set(not upd_var.get())
+            upd_status_lbl.config(text="☑" if upd_var.get() else "☐", 
+                                 fg=colors["active"] if upd_var.get() else colors["subtext"])
+            self.save_config()
+
+        upd_status_lbl = tk.Label(f_upd, text="☑" if upd_var.get() else "☐", 
+                                 bg=colors["bg"], fg=colors["active"] if upd_var.get() else colors["subtext"],
+                                 font=("Segoe UI Symbol", 11), cursor="hand2")
+        upd_status_lbl.pack(side="left")
+        
+        upd_txt_lbl = tk.Label(f_upd, text=self.t("check_update_startup"), bg=colors["bg"], fg=colors["text"],
+                              font=("Microsoft YaHei", 9), cursor="hand2")
+        upd_txt_lbl.pack(side="left", padx=5)
+        
+        for w in (upd_status_lbl, upd_txt_lbl):
+            w.bind("<Button-1>", toggle_upd_ui)
+
+        # 选项：Win+H 唤起行为
+        f_h = tk.Frame(win, bg=colors["bg"])
+        f_h.pack(fill="x", padx=15, pady=3)
+        tk.Label(f_h, text=self.t("win_h_action"), bg=colors["bg"], fg=colors["text"], 
+                font=("Microsoft YaHei", 9)).pack(side="left")
+        
+        h_options = [("system", self.t("system")), ("ifly", self.t("ifly"))]
+        h_frame = tk.Frame(f_h, bg=colors["bg"])
+        h_frame.pack(side="right")
+        
+        def on_h_change(val):
+            self.win_h_action.set(val)
+            self._ifly_active_sync = (val == "ifly")
+            if self._ifly_active_sync: self._start_keyboard_hook()
+            self.save_config()
+            update_group_active(h_frame, val)
+            # 精准局部刷新，拒绝全窗闪烁
+            self.update_ifly_status_display() 
+
+        for val, label in h_options:
+            is_selected = self.win_h_action.get() == val
+            btn = tk.Label(h_frame, text=label, 
+                          bg=colors["active"] if is_selected else colors["btn"],
+                          fg="white" if is_selected else colors["text"], 
+                          font=("Microsoft YaHei", 8), padx=8, pady=2, cursor="hand2")
+            btn._val = val
+            btn.pack(side="left", padx=2)
+            btn.bind("<Button-1>", lambda e, v=val: on_h_change(v))
 
         # 选项：界面语言
         f_lang = tk.Frame(win, bg=colors["bg"])
-        f_lang.pack(fill="x", padx=15, pady=6)
+        f_lang.pack(fill="x", padx=15, pady=3)
         tk.Label(f_lang, text=self.t("language"), bg=colors["bg"], fg=colors["text"], 
                 font=("Microsoft YaHei", 9)).pack(side="left")
         
@@ -1269,24 +1471,26 @@ class QuickBarApp:
         def on_lang_change(val):
             self.language.set(val)
             self.save_config()
-            win.destroy()
+            # 语言切换必须全量重绘界面以刷新翻译
             self.setup_ui()
-        
+
         for val, label in lang_options:
             is_selected = self.language.get() == val
             btn = tk.Label(lang_frame, text=label, 
                           bg=colors["active"] if is_selected else colors["btn"],
                           fg="white" if is_selected else colors["text"], 
                           font=("Microsoft YaHei", 8), padx=6, pady=2, cursor="hand2")
+            btn._val = val
             btn.pack(side="left", padx=2)
             btn.bind("<Button-1>", lambda e, v=val: on_lang_change(v))
-
-        # 分隔线
-        tk.Frame(win, bg=colors["subtext"], height=1).pack(fill="x", padx=15, pady=10)
-
-        # 配置导入导出按钮
+        
+        # 配置导入导出区域 (已移除分隔线)
         f_config = tk.Frame(win, bg=colors["bg"])
-        f_config.pack(fill="x", padx=15, pady=6)
+        f_config.pack(fill="x", padx=15, pady=(15, 6))
+        
+        # 增加“配置:”标签
+        tk.Label(f_config, text="配置:", bg=colors["bg"], fg=colors["text"], 
+                font=("Microsoft YaHei", 9)).pack(side="left")
         
         def import_config():
             from tkinter import filedialog, messagebox
@@ -1323,10 +1527,16 @@ class QuickBarApp:
                 except Exception as e:
                     messagebox.showerror("Error", str(e))
         
-        tk.Button(f_config, text=self.t("import_config"), bg=colors["btn"], fg=colors["text"],
-                 relief="flat", font=("Microsoft YaHei", 8), command=import_config).pack(side="left", padx=5)
-        tk.Button(f_config, text=self.t("export_config"), bg=colors["btn"], fg=colors["text"],
-                 relief="flat", font=("Microsoft YaHei", 8), command=export_config).pack(side="left", padx=5)
+        # 导入/导出按钮美化：统一颜色，消除白色背景块
+        btn_im = tk.Label(f_config, text=self.t("import_config"), bg=colors["btn"], fg=colors["text"],
+                         font=("Microsoft YaHei", 8), cursor="hand2", padx=10, pady=3)
+        btn_im.pack(side="left", padx=5)
+        btn_im.bind("<Button-1>", lambda e: import_config())
+        
+        btn_ex = tk.Label(f_config, text=self.t("export_config"), bg=colors["btn"], fg=colors["text"],
+                         font=("Microsoft YaHei", 8), cursor="hand2", padx=10, pady=3)
+        btn_ex.pack(side="left", padx=5)
+        btn_ex.bind("<Button-1>", lambda e: export_config())
 
         # 底部：版本信息和检查更新
         bottom_frame = tk.Frame(win, bg=colors["bg"])
@@ -1419,7 +1629,7 @@ class QuickBarApp:
 
             
             # 绑定拖拽逻辑
-            btn_canvas.bind("<Button-1>", lambda e, i=idx, t=cmd['text']: self.start_drag(e, i, t))
+            btn_canvas.bind("<Button-1>", lambda e, i=idx, c=cmd: self.start_drag(e, i, c))
             btn_canvas.bind("<B1-Motion>", self.do_drag)
             btn_canvas.bind("<ButtonRelease-1>", self.stop_drag)
             btn_canvas.bind("<Button-3>", lambda e, c=cmd, i=idx: self.show_context_menu(e, c, i))
@@ -1429,7 +1639,7 @@ class QuickBarApp:
 
 
     # --- 改进后的拖拽排序逻辑 ---
-    def start_drag(self, event, idx, text):
+    def start_drag(self, event, idx, cmd):
         """按下按钮：初始化拖拽环境"""
         # 立即标记正在拖拽按钮，阻止窗口移动模式
         self.is_button_dragging = True
@@ -1448,7 +1658,7 @@ class QuickBarApp:
                 return "break"
 
         self.drag_start_idx = idx
-        self.drag_text = text
+        self.drag_cmd = cmd
         self.drag_obj = event.widget
         self.drag_y_origin = event.y 
         self.drag_y_root_start = event.y_root
@@ -1617,7 +1827,7 @@ class QuickBarApp:
         
         if not self.is_real_drag:
             # 单击：发送命令
-            self.send_to_target(self.drag_text)
+            self.send_to_target(self.drag_cmd)
         else:
             # 拖拽完成：移动命令
             if hasattr(self, 'drag_target_idx'):
@@ -1684,9 +1894,9 @@ class QuickBarApp:
         else: self.root.config(cursor="arrow")
 
     # --- 自动化工作流逻辑 ---
-    def send_to_target(self, text):
+    def send_to_target(self, cmd):
         """在新线程中启动自动化任务，避免界面卡死"""
-        threading.Thread(target=self._automation_task, args=(text,), daemon=True).start()
+        threading.Thread(target=self._automation_task, args=(cmd,), daemon=True).start()
 
     def enable_cmd_shortcuts(self):
         """自动开启 Windows 控制台的 Ctrl+V 和右键粘贴支持"""
@@ -1697,8 +1907,16 @@ class QuickBarApp:
             winreg.SetValueEx(key, "InterceptCopyPaste", 0, winreg.REG_DWORD, 1)
             winreg.CloseKey(key)
         except: pass
-    def _automation_task(self, prompt):
+    def _automation_task(self, cmd):
         """核心自动化流程：寻找窗口 -> 激活 -> 模拟输入"""
+        if isinstance(cmd, str):
+            # 兼容旧代码调用
+            prompt = cmd
+            cmd_type = "text"
+        else:
+            prompt = cmd.get("text", "")
+            cmd_type = cmd.get("type", "text")
+
         # 1. 立即记录原始鼠标位置（在任何窗口激活操作之前）
         old_pos = pyautogui.position()
         
@@ -1780,12 +1998,20 @@ class QuickBarApp:
 
             if ide == "Native CLI":
                 self.enable_cmd_shortcuts()
-                pyperclip.copy(prompt)
-                time.sleep(0.05)
-                rect = target_win.rectangle()
-                pyautogui.moveTo((rect.left + rect.right)//2, (rect.top + rect.bottom)//2)
-                time.sleep(0.05); pyautogui.rightClick()
-                if self.auto_send.get(): pyautogui.press('enter')
+                if cmd_type == "key":
+                    # 模拟快捷键逻辑
+                    keys = [k.strip().lower() for k in prompt.split('+')]
+                    try:
+                        pyautogui.hotkey(*keys)
+                    except Exception as e:
+                        logger.error(f"快捷键按下失败: {keys}, error: {e}")
+                else:
+                    pyperclip.copy(prompt)
+                    time.sleep(0.05)
+                    rect = target_win.rectangle()
+                    pyautogui.moveTo((rect.left + rect.right)//2, (rect.top + rect.bottom)//2)
+                    time.sleep(0.05); pyautogui.rightClick()
+                    if self.auto_send.get(): pyautogui.press('enter')
                 pyautogui.moveTo(old_pos)
             else:
                 try:
@@ -1806,12 +2032,21 @@ class QuickBarApp:
                             pyautogui.hotkey('ctrl', 'a')
                             time.sleep(0.05)
                             pyautogui.press('backspace') 
-                            pyperclip.copy(prompt)
-                            time.sleep(0.05)
-                            pyautogui.hotkey('ctrl', 'v') 
-                            if self.auto_send.get(): 
+                            
+                            if cmd_type == "key":
+                                # 模拟快捷键逻辑
+                                keys = [k.strip().lower() for k in prompt.split('+')]
+                                try:
+                                    pyautogui.hotkey(*keys)
+                                except Exception as e:
+                                    logger.error(f"快捷键按下失败: {keys}, error: {e}")
+                            else:
+                                pyperclip.copy(prompt)
                                 time.sleep(0.05)
-                                pyautogui.press('enter')
+                                pyautogui.hotkey('ctrl', 'v') 
+                                if self.auto_send.get(): 
+                                    time.sleep(0.05)
+                                    pyautogui.press('enter')
                             
                             # 完成后返回原始位置
                             pyautogui.moveTo(old_pos)
@@ -1834,15 +2069,15 @@ class QuickBarApp:
 
     # --- 辅助弹窗方法 ---
     def add_command_dialog(self):
-        d = EditDialog(self, "新增指令", "", "", self.themes[self.current_theme.get()])
+        d = EditDialog(self, "新增指令", "", "", "text", self.themes[self.current_theme.get()])
         if d.result: 
-            self.commands.append({"name": d.result[0], "text": d.result[1]})
+            self.commands.append({"name": d.result[0], "text": d.result[1], "type": d.result[2]})
             self.save_config(); self.setup_ui()
 
     def edit_command_dialog(self, cmd):
-        d = EditDialog(self, "编辑指令", cmd['name'], cmd['text'], self.themes[self.current_theme.get()])
+        d = EditDialog(self, "编辑指令", cmd['name'], cmd['text'], cmd.get('type', 'text'), self.themes[self.current_theme.get()])
         if d.result: 
-            cmd['name'], cmd['text'] = d.result
+            cmd['name'], cmd['text'], cmd['type'] = d.result
             self.save_config(); self.setup_ui()
 
     def show_context_menu(self, event, cmd, idx):
@@ -1915,57 +2150,404 @@ class QuickBarApp:
         for child in self.root.winfo_children():
             # 排除 place 布局的拖拽对象
             if child.winfo_manager() == 'pack':
+                # 获取组件的实际高度（包含内部填充）
                 total_h += child.winfo_reqheight()
         
-        # 获取当前窗口的 X 坐标和宽度
+        # 获取当前窗口状态
         curr_geom = self.root.geometry().split('+')
         w_str = curr_geom[0].split('x')[0]
         curr_x = curr_geom[1]
         curr_y = curr_geom[2]
         
-        # 加上足够的安全余量（底部工具栏 + 边距）
-        new_h = total_h + 20
+        # 增加 5 像素的安全缓冲，防止底栏因计算精度问题被截断
+        new_h = total_h + 5
         
         # 限制高度：不宜过小也不宜超过屏幕
         screen_h = self.root.winfo_screenheight()
         final_h = min(max(new_h, 150), screen_h - 100)
         
-        self.root.geometry(f"{w_str}x{final_h}+{curr_x}+{curr_y}")
-        self.save_config()
+        # 只有在高度跨度较大（>2像素）时才应用新几何，减少微小抖动
+        old_h = int(curr_geom[0].split('x')[1])
+        if abs(final_h - old_h) > 2:
+            self.root.geometry(f"{w_str}x{final_h}+{curr_x}+{curr_y}")
+            self.save_config()
+
+    def _start_keyboard_hook(self):
+        """核心驱动：原子级物理隔离方案 (专门压制 Win11 25H2 内核热键)"""
+        if hasattr(self, 'keyboard_hook_thread') and self.keyboard_hook_thread and self.keyboard_hook_thread.is_alive():
+            return
+            
+        def _hook_loop():
+            user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+            
+            # --- 内存对齐的 INPUT 结构 ---
+            class KEYBDINPUT(ctypes.Structure):
+                _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_ulong),
+                           ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_void_p)]
+            class INPUT_UNION(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+            class INPUT(ctypes.Structure):
+                _fields_ = [("type", ctypes.c_ulong), ("u", INPUT_UNION)]
+
+            class KBDLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                           ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                           ("dwExtraInfo", ctypes.c_void_p)]
+
+            def send_k(vk, up=False):
+                flags = 0x0002 if up else 0
+                user32.SendInput(1, ctypes.byref(INPUT(1, INPUT_UNION(ki=KEYBDINPUT(vk, 0, flags, 0, None)))), ctypes.sizeof(INPUT))
+
+            WH_KEYBOARD_LL = 13
+            WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
+            VK_H, VK_LWIN, VK_RWIN, VK_ESC, VK_ALT = 0x48, 0x5B, 0x5C, 0x1B, 0x12
+            LLKHF_INJECTED = 0x10
+
+            # 定义回调需要的精确类型
+            WPARAM = ctypes.c_void_p
+            LPARAM = ctypes.c_void_p
+            LRESULT = ctypes.c_void_p
+
+            # 显式声明 API 类型防止调用崩溃
+            user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, WPARAM, LPARAM]
+            user32.CallNextHookEx.restype = LRESULT
+
+            def low_level_handler(nCode, wParam, lParam):
+                try:
+                    if nCode == 0:
+                        # 转换并解析结构体
+                        struct = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                        
+                        # 屏蔽由本进程注入的按键，防止无限递归
+                        if struct.flags & LLKHF_INJECTED:
+                            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+                            
+                        vk = struct.vkCode
+                        w_param_val = wParam if wParam is not None else 0
+                        is_key_down = w_param_val in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                        
+                        # 核心判定：当按下 H 键且 Win 键被持有时
+                        if vk == VK_H and is_key_down:
+                            lwin = user32.GetAsyncKeyState(VK_LWIN) & 0x8000
+                            rwin = user32.GetAsyncKeyState(VK_RWIN) & 0x8000
+                            
+                            if lwin or rwin:
+                                # 检测 Alt 键状态
+                                alt = user32.GetAsyncKeyState(VK_ALT) & 0x8000
+                                
+                                if alt:
+                                    # --- 移植功能：Win + Alt + H -> 触发系统原生听写 (Win + H) ---
+                                    # 严格参照 Agile AHK Logic: #!h:: Send("#h")
+                                    def _trigger_system_dictation():
+                                        # 系统热键判定极其敏感。在按下 Win+Alt+H 时：
+                                        # 1. 我们必须告诉系统 Alt 已经起来了
+                                        user32.keybd_event(VK_ALT, 0, 0x0002, 0) # Alt UP
+                                        
+                                        # 2. 注入 Win + H。注意：Win 此时物理上是按下的，我们只需注入 H 脉冲
+                                        # 如果 Win 被逻辑释放，系统可能判定为无效序列，所以保持 Win 按下
+                                        user32.keybd_event(VK_H, 0, 0, 0)      # H DOWN
+                                        user32.keybd_event(VK_H, 0, 0x0002, 0) # H UP
+                                        
+                                        # 3. 恢复 Alt 状态以便用户后续操作（如果用户还没松手）
+                                        if user32.GetAsyncKeyState(VK_ALT) & 0x8000:
+                                            user32.keybd_event(VK_ALT, 0, 0, 0) # Alt DOWN
+                                            
+                                    self.root.after(10, _trigger_system_dictation)
+                                    return ctypes.c_void_p(1).value
+                                
+                                if self._ifly_active_sync:
+                                    # --- 讯飞模式：Win + H -> 触发讯飞语音 ---
+                                    # 物理序列粉碎
+                                    send_k(0x07, False); send_k(0x07, True)
+                                    if lwin: send_k(VK_LWIN, True)
+                                    if rwin: send_k(VK_RWIN, True)
+                                    send_k(VK_ESC, False); send_k(VK_ESC, True)
+                                    
+                                    # 异步任务
+                                    self.root.after(1, self.trigger_ifly_voice)
+                                    self.root.after(50, self._suppress_system_ui)
+                                    
+                                    return ctypes.c_void_p(1).value
+                except Exception as e:
+                    pass
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            CALLBACK = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
+            self._hook_callback_p = CALLBACK(low_level_handler)
+            
+            # 使用本地模块句柄作为加载源，避免被 Win11 的 dll 隔离机制拦截
+            # h_mod = kernel32.GetModuleHandleW(None)
+            self._h_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_callback_p, None, 0)
+            
+            if not self._h_hook:
+                err_code = kernel32.GetLastError()
+                logger.error(f"严重：驱动拦截模块挂载失败 (Win32 Error: {err_code})。请确认已授予管理员权限且安全软件未拦截。")
+                return
+            
+            logger.info(">>> Win+H 系统级压制驱动已就绪 <<<")
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                user32.TranslateMessage(ctypes.byref(msg)); user32.DispatchMessageW(ctypes.byref(msg))
+                try: 
+                    if not self.root.winfo_exists(): break
+                except: break
+            
+            if self._h_hook: user32.UnhookWindowsHookEx(self._h_hook)
+
+        self.keyboard_hook_thread = threading.Thread(target=_hook_loop, daemon=True)
+        self.keyboard_hook_thread.start()
+
+    def _suppress_system_ui(self):
+        """压制 Windows 11 听写工具生成的残留窗口"""
+        try:
+            def callback(hwnd, _):
+                class_name = win32gui.GetClassName(hwnd)
+                #TextInputHost 是 Win11 听写工具的核心进程窗口类名
+                if "TextInputHost" in class_name or "CoreWindow" in class_name:
+                    title = win32gui.GetWindowText(hwnd).lower()
+                    if not title or "dictation" in title or "听写" in title:
+                        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+            win32gui.EnumWindows(callback, None)
+        except: pass
+
+    def trigger_ifly_voice(self):
+        """100% 参照 Agile AHK 逻辑实现，并增强了对版本升级的兼容性"""
+        app_exe = "iFlyVoice.exe"
+        
+        # 寻找真实的 AppPath (不再死守 3.0.1746，而是全目录扫描以支持未来版本)
+        final_app_path = None
+        # 优先检索常见的系统安装路径
+        for search_root in [r"C:\Program Files (x86)\iFlytek", r"C:\Program Files\iFlytek", r"D:\Program Files (x86)\iFlytek", r"D:\Program Files\iFlytek"]:
+            if os.path.exists(search_root):
+                # 递归搜索 iFlyVoice.exe，这样版本号变了也能找到
+                for root, dirs, files in os.walk(search_root):
+                    if app_exe in files:
+                        final_app_path = os.path.join(root, app_exe)
+                        break
+            if final_app_path: break
+
+        def _get_target_hwnd():
+            target = [None]
+            def _enum(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd):
+                    try:
+                        cls = win32gui.GetClassName(hwnd)
+                        # 对应 ahk_class BaseGui
+                        if cls == "BaseGui":
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            proc = psutil.Process(pid)
+                            # 对应 ahk_exe iFlyVoice.exe
+                            if proc.name().lower() == app_exe.lower():
+                                target[0] = hwnd
+                                return False # 找到后中止
+                    except: pass
+                return True
+            try:
+                win32gui.EnumWindows(_enum, None)
+            except pywintypes.error:
+                # 在 win32gui 中，如果回调返回 False，EnumWindows 会抛出特定异常，代表找到并停止
+                pass
+            except Exception:
+                pass
+            return target[0]
+
+        hwnd = _get_target_hwnd()
+        
+        # --- 对应 Agile AHK 的 TriggerIFlyVoice 逻辑 ---
+        if hwnd:
+            # 对应 FocusAndClick(AppExeFile)
+            # clickX := 119, clickY := 59
+            lp = win32api.MAKELONG(119, 59)
+            
+            # WinSetAlwaysOnTop(1, ...)
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW | win32con.SWP_NOACTIVATE)
+            
+            # ControlClick(...) 使用 PostMessage 模拟
+            win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lp)
+            
+            def _release(h=hwnd, p=lp):
+                try:
+                    win32gui.PostMessage(h, win32con.WM_LBUTTONUP, 0, p)
+                    # WinSetAlwaysOnTop(0, ...)
+                    win32gui.SetWindowPos(h, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                except: pass
+
+            self.root.after(50, _release) # 参照 Agile 物理特性增加极短保持
+            logger.info("Agile 原版触发成功")
+        else:
+            # 对应 LaunchIFlyVoice(AppPath)
+            if final_app_path:
+                logger.info(f"正在按 Agile 逻辑启动: {final_app_path}")
+                os.startfile(final_app_path)
+                # AHK 的 Run 之后没有显式等待，但为了体验我们稍微等一下再尝试一次触发
+                self.root.after(1500, self.trigger_ifly_voice)
+            else:
+                logger.warning("未定位到 iFlyVoice 安装路径")
 
 class EditDialog(tk.Toplevel):
-    """自适应主题的指令编辑弹窗"""
-    def __init__(self, app, title, name, text, colors):
+    """自适应主题且视觉精美的指令编辑弹窗"""
+    def __init__(self, app, title, name, text, cmd_type, colors):
         super().__init__(app.root)
+        self.app = app
         self.title(title); self.result = None
-        self.geometry(f"300x260+{app.root.winfo_x()+20}+{app.root.winfo_y()+100}")
-        self.attributes("-topmost", True); self.resizable(False, False)
+        self.colors = colors
+        
+        # 窗口大小 (适度增加高度以适应更大的行间距)
+        w, h = 360, 320
+        self.attributes("-topmost", True); self.resizable(True, True)
         self.configure(bg=colors["bg"])
+        self.minsize(340, 300)
         
-        tk.Label(self, text="按钮名称:", bg=colors["bg"], fg=colors["subtext"]).pack(padx=10, anchor="w", pady=(10,0))
-        self.ne = tk.Entry(self, bg=colors["btn"], fg=colors["text"], insertbackground=colors["text"], relief="flat")
-        self.ne.insert(0, name); self.ne.pack(padx=10, pady=5, fill="x")
+        # 计算弹出位置：默认在主窗口右侧弹出，但如果超出屏幕则向左偏置
+        root_x = app.root.winfo_x()
+        root_y = app.root.winfo_y()
+        screen_w = self.winfo_screenwidth()
         
-        tk.Label(self, text="指令内容:", bg=colors["bg"], fg=colors["subtext"]).pack(padx=10, anchor="w")
-        self.ta = tk.Text(self, bg=colors["btn"], fg=colors["text"], insertbackground=colors["text"], relief="flat", height=6)
-        self.ta.insert("1.0", text); self.ta.pack(padx=10, pady=5, fill="x")
+        target_x = root_x + 20
+        # 如果右侧空间不足以放下新窗口，则向左移动
+        if target_x + w > screen_w:
+            target_x = screen_w - w - 20
+            
+        self.geometry(f"{w}x{h}+{target_x}+{root_y+50}")
         
-        bf = tk.Frame(self, bg=colors["bg"]); bf.pack(pady=10)
-        tk.Button(bf, text="确定", width=10, bg=colors["active"], fg="white", relief="flat", 
-                  command=self.on_save).pack(side="left", padx=5)
-        tk.Button(bf, text="取消", width=10, bg=colors["btn"], fg=colors["subtext"], relief="flat", 
-                  command=self.destroy).pack(side="left", padx=5)
+        # 主容器
+        self.main_frame = tk.Frame(self, bg=colors["bg"], padx=20, pady=15)
+        self.main_frame.pack(fill="both", expand=True)
+        
+        # 1. 指令名称部分 (同一行，增加下边距)
+        name_row = tk.Frame(self.main_frame, bg=colors["bg"])
+        name_row.pack(fill="x", pady=(0, 15))
+        tk.Label(name_row, text=app.t("btn_name"), bg=colors["bg"], fg=colors["subtext"], 
+                 font=("Microsoft YaHei", 9), width=10, anchor="ne").pack(side="left", pady=5)
+        self.ne = self._create_styled_entry(name_row, name)
+        
+        # 2. 指令类型 (同一行，增加下边距)
+        type_row = tk.Frame(self.main_frame, bg=colors["bg"])
+        type_row.pack(fill="x", pady=(0, 15))
+        tk.Label(type_row, text=app.t("cmd_type"), bg=colors["bg"], fg=colors["subtext"], 
+                 font=("Microsoft YaHei", 9), width=10, anchor="ne").pack(side="left")
+        
+        self.type_var = tk.StringVar(value=cmd_type)
+        rb_style = {"bg": colors["bg"], "fg": colors["text"], "activebackground": colors["bg"], 
+                    "activeforeground": colors["active"], "selectcolor": colors["btn"], 
+                    "font": ("Microsoft YaHei", 9), "relief": "flat"}
+        
+        # 增加 padx 以拉开标签和单选按钮的水平间距
+        tk.Radiobutton(type_row, text=app.t("text_mode"), variable=self.type_var, value="text", **rb_style).pack(side="left", padx=(15, 10))
+        tk.Radiobutton(type_row, text=app.t("key_mode"), variable=self.type_var, value="key", **rb_style).pack(side="left")
+
+        # 3. 指令内容部分 (标签与输入框在同一行，优化对齐)
+        self.content_row = tk.Frame(self.main_frame, bg=colors["bg"])
+        self.content_row.pack(fill="both", expand=True, pady=(0, 5))
+        
+        # 增加标签宽度至 10，确保文字不被遮挡，使用 anchor="ne" 并微调 pady 使其与 Text 首行对齐
+        self.content_lbl = tk.Label(self.content_row, text=app.t("cmd_content"), bg=colors["bg"], 
+                                   fg=colors["subtext"], font=("Microsoft YaHei", 9), width=10, anchor="ne")
+        # 这里的 side="left" 配合 pady=8 是为了对齐 Text 内部的首行文字
+        self.content_lbl.pack(side="left", anchor="nw", pady=8)
+        
+        self.ta = self._create_styled_text(self.content_row, text)
+        self.ta.bind("<KeyPress>", self._on_key_press)
+        
+        # 提示文字 (始终预先 pack 以锁定布局空间，防止不同模式下高度错位)
+        self.tip_label = tk.Label(self.main_frame, text="", 
+                                 bg=colors["bg"], fg=colors["subtext"], 
+                                 font=("Microsoft YaHei", 8))
+        self.tip_label.pack(side="top", anchor="e")
+        
+        # 4. 底部按钮容器 (优化布局：按钮整体居中，确定在左，取消在右)
+        self.btn_frame = tk.Frame(self.main_frame, bg=colors["bg"])
+        self.btn_frame.pack(side="bottom", fill="x", pady=(20, 0))
+        
+        # 为了实现居中，我们再嵌套一层 Frame
+        inner_btn_frame = tk.Frame(self.btn_frame, bg=colors["bg"])
+        inner_btn_frame.pack(expand=True)
+        
+        confirm_text = "确定" if app.language.get() == "zh" else "OK"
+        cancel_text = "取消" if app.language.get() == "zh" else "Cancel"
+        
+        # 确定按钮在左
+        self.save_btn = tk.Button(inner_btn_frame, text=confirm_text, bg=colors["active"], fg="white", 
+                                 relief="flat", font=("Microsoft YaHei", 9), command=self.on_save, 
+                                 pady=4, width=10, bd=0, highlightthickness=0)
+        self.save_btn.pack(side="left", padx=10)
+        
+        # 取消按钮在右
+        self.cancel_btn = tk.Button(inner_btn_frame, text=cancel_text, bg=colors["btn"], fg=colors["text"], 
+                                   relief="flat", font=("Microsoft YaHei", 9), command=self.destroy, 
+                                   pady=4, width=10, bd=0, highlightthickness=0)
+        self.cancel_btn.pack(side="left", padx=10)
+        
+        # 初始化状态
+        self.type_var.trace_add("write", lambda *a: self._on_type_ui_update())
+        self._on_type_ui_update()
+        
         self.grab_set(); self.wait_window()
+
+    def _create_styled_entry(self, parent, val):
+        # 增加 padx=(15, 0) 以拉开标签和输入框的水平间距
+        container = tk.Frame(parent, bg=self.colors["btn"], padx=8, pady=4)
+        container.pack(side="left", fill="x", expand=True, padx=(15, 0))
+        e = tk.Entry(container, bg=self.colors["btn"], fg=self.colors["text"], 
+                    insertbackground=self.colors["text"], relief="flat", 
+                    font=("Microsoft YaHei", 10))
+        e.insert(0, val)
+        e.pack(fill="both")
+        return e
+
+    def _create_styled_text(self, parent, val):
+        # 增加 padx=(15, 0) 以拉开标签和输入框的水平间距
+        container = tk.Frame(parent, bg=self.colors["btn"], padx=8, pady=4)
+        container.pack(side="left", fill="both", expand=True, padx=(15, 0))
+        # 初始高度硬锁定为 2
+        self.ta = tk.Text(container, bg=self.colors["btn"], fg=self.colors["text"], 
+                         insertbackground=self.colors["text"], relief="flat", 
+                         font=("Microsoft YaHei", 10), height=2, wrap="word")
+        self.ta.insert("1.0", val)
+        self.ta.pack(fill="both", expand=True)
+        return self.ta
+
+    def _on_type_ui_update(self):
+        ctype = self.type_var.get()
+        # 强制性地统一高度配置，确保无跳变
+        self.ta.config(height=2)
+        
+        if ctype == "text":
+            self.content_lbl.config(text=self.app.t("cmd_content"))
+            self.tip_label.config(text="") # 仅清空文字，保留占位
+        else:
+            self.content_lbl.config(text=self.app.t("key_content"))
+            self.tip_label.config(text=self.app.t("key_tip"))
+
+    def _on_key_press(self, event):
+        if self.type_var.get() != "key": return
+        sym = event.keysym
+        if sym in ("Control_L", "Control_R", "Shift_L", "Shift_R", "Alt_L", "Alt_R", "Win_L", "Win_R", "Meta_L", "Meta_R"):
+            return "break"
+        modifiers = []
+        if event.state & 0x0001: modifiers.append("shift")
+        if event.state & 0x0004: modifiers.append("ctrl")
+        if (event.state & 0x0008) and (sym.lower() != "backspace"): modifiers.append("alt")
+        if event.state & 0x40: modifiers.append("win")
+
+        if sym.lower() == "backspace" and not modifiers:
+            self.ta.delete("1.0", "end")
+            return "break"
+
+        key_map = {"return": "enter", "escape": "esc", "space": "space", "tab": "tab", "backspace": "backspace", "delete": "delete", "prior": "pgup", "next": "pgdn", "caps_lock": "capslock", "num_lock": "numlock"}
+        key_name = key_map.get(sym.lower(), sym.lower())
+        res = "+".join(modifiers + [key_name])
+        self.ta.delete("1.0", "end"); self.ta.insert("1.0", res)
+        return "break"
 
     def on_save(self):
         n, t = self.ne.get().strip(), self.ta.get("1.0", "end-1c").strip()
-        if not t: return # 指令内容不能为空
-        
-        # 如果按钮名称没有填写，则默认采用指令内容的前 10 个字符
-        if not n:
-            n = (t[:10] + "..") if len(t) > 10 else t
-            
-        self.result = (n, t)
+        ctype = self.type_var.get()
+        if not t: return 
+        if not n: n = (t[:10] + "..") if len(t) > 10 else t
+        self.result = (n, t, ctype)
         self.destroy()
 
 class ScreenshotDialog:
@@ -2101,13 +2683,28 @@ class LocationDialog:
         self.z_win.destroy(); self.root.destroy()
 
 if __name__ == "__main__":
-    # 单实例检测：尝试绑定一个不常用的端口
+    # 1. 管理员权限自动提升 (Self-Elevation)
+    # 对于全局热键拦截 Win+H，必须具备管理员权限才能操作系统级输入流
     try:
-        # 我们需要保持这个 socket 对象的引用，直到程序退出
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            # 使用 ShellExecuteW 以管理员权限重启
+            # 传递原始脚本路径和所有命令行参数，sw_show=1
+            hinstance = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, f'"{sys.argv[0]}"', None, 1
+            )
+            # 如果 ShellExecute 成功，hinstance 会大于 32
+            if hinstance > 32:
+                sys.exit(0)
+            else:
+                logger.error("用户拒绝了管理员提权请求，Win+H 拦截可能失效")
+    except Exception as e:
+        logger.error(f"自动化提权失败: {e}")
+
+    # 2. 单实例检测：尝试绑定一个不常用的端口
+    try:
         lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         lock_socket.bind(('127.0.0.1', 12456))
     except socket.error:
-        # 端口已被占用，说明已有实例运行
         messagebox.showwarning("QuickBar", "程序已经在运行中！")
         sys.exit(0)
 
